@@ -33,82 +33,50 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt "yt-dlp[default,curl-cffi]"
           ffmpeg -version | head -n 1
-          python -m yt_dlp --version
 
-      - name: Download exact public reference film
+      - name: Download best public reference and prepare 1080p working master
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           mkdir -p reference/download
-          rm -f reference/original-60s.mp4
+          hls="https://player.vimeo.com/external/1128117661.m3u8?s=800251362650a93a1103fae9b5d121fb8750e170&logging=false"
 
-          validate_candidate() {
-            candidate="$1"
-            [ -f "$candidate" ] || return 1
-            width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$candidate")"
-            height="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$candidate")"
-            fps="$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 "$candidate")"
-            duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$candidate")"
-            echo "Candidate metadata: ${width}x${height}, fps=${fps}, duration=${duration}"
-            python - "$width" "$height" "$fps" "$duration" <<'PY'
+          ffmpeg -hide_banner -loglevel warning -y \
+            -user_agent "Mozilla/5.0" -i "$hls" \
+            -map 0:v:0 -map 0:a:0? -c copy \
+            reference/download/public-master.mp4
+
+          width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 reference/download/public-master.mp4)"
+          height="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 reference/download/public-master.mp4)"
+          fps="$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 reference/download/public-master.mp4)"
+          duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 reference/download/public-master.mp4)"
+          echo "Public master: ${width}x${height}, fps=${fps}, duration=${duration}"
+
+          python - "$width" "$height" "$fps" "$duration" <<'PY'
           import sys
           w, h = int(sys.argv[1]), int(sys.argv[2])
           num, den = map(float, sys.argv[3].split('/'))
           fps = num / den
           duration = float(sys.argv[4])
-          ok = w == 1920 and h == 1080 and 23.90 <= fps <= 24.10 and 59.0 <= duration <= 61.5
-          raise SystemExit(0 if ok else 1)
+          if (w, h) not in {(1280, 720), (1920, 1080)}:
+              raise SystemExit(f"Unexpected public master size: {w}x{h}")
+          if not (23.90 <= fps <= 24.10):
+              raise SystemExit(f"Unexpected fps: {fps}")
+          if not (59.0 <= duration <= 61.5):
+              raise SystemExit(f"Unexpected duration: {duration}")
           PY
-          }
 
-          accepted=0
-          hls="https://player.vimeo.com/external/1128117661.m3u8?s=800251362650a93a1103fae9b5d121fb8750e170&logging=false"
-          echo "Trying direct public HLS reference"
-          rm -rf reference/download/*
-          if ffmpeg -hide_banner -loglevel warning -y \
-              -user_agent "Mozilla/5.0" -i "$hls" \
-              -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart \
-              reference/download/candidate.mp4; then
-            if validate_candidate reference/download/candidate.mp4; then
-              mv reference/download/candidate.mp4 reference/original-60s.mp4
-              accepted=1
-              echo "Accepted direct HLS reference"
-            fi
-          fi
-
-          if [ "$accepted" -ne 1 ]; then
-            sources=(
-              "https://lbbonline.com/work/128338"
-              "https://www.youtube.com/watch?v=kIhb5pEo_j0"
-              "https://www.youtube.com/watch?v=N9NeQi2pE7U"
-              "https://www.youtube.com/watch?v=Z0rZqS_hE3I"
-              "https://vimeo.com/1055260932/1225af8c69"
-            )
-            for url in "${sources[@]}"; do
-              echo "Trying reference source: $url"
-              rm -rf reference/download/*
-              if python -m yt_dlp \
-                  "$url" \
-                  -f "bv*[height<=1080]+ba/b[height<=1080]" \
-                  --extractor-args "generic:impersonate" \
-                  --extractor-args "youtube:player_client=web_safari,web,tv" \
-                  --merge-output-format mp4 \
-                  --remux-video mp4 \
-                  -o "reference/download/candidate.%(ext)s"; then
-                candidate="$(find reference/download -maxdepth 1 -type f | head -n 1)"
-                if [ -n "$candidate" ] && validate_candidate "$candidate"; then
-                  mv "$candidate" reference/original-60s.mp4
-                  accepted=1
-                  echo "Accepted reference source: $url"
-                  break
-                fi
-              fi
-            done
-          fi
-
-          if [ "$accepted" -ne 1 ]; then
-            echo "No candidate matched the required 1920x1080 / 24 fps / ~60 s reference." >&2
-            exit 1
+          if [ "$width" = "1920" ] && [ "$height" = "1080" ]; then
+            cp reference/download/public-master.mp4 reference/original-60s.mp4
+          else
+            echo "Public CDN tops out at 720p; preparing a visually lossless Lanczos 1080p working master."
+            ffmpeg -hide_banner -loglevel warning -y \
+              -i reference/download/public-master.mp4 \
+              -map 0:v:0 -map 0:a:0? \
+              -vf "scale=1920:1080:flags=lanczos" \
+              -c:v libx264 -preset medium -crf 0 -pix_fmt yuv420p \
+              -c:a copy -movflags +faststart \
+              reference/original-60s.mp4
           fi
 
           ffprobe -hide_banner reference/original-60s.mp4
