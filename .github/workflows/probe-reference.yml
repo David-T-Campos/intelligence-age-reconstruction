@@ -1,0 +1,21 @@
+name: Probe public reference variants
+
+on:
+  push:
+    paths:
+      - ".github/workflows/probe-reference.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print HLS master
+        shell: bash
+        run: |
+          set -euo pipefail
+          hls='https://player.vimeo.com/external/1128117661.m3u8?s=800251362650a93a1103fae9b5d121fb8750e170&logging=false'
+          curl -fLsS -A 'Mozilla/5.0' "$hls" -o master.m3u8
+          cat master.m3u8
