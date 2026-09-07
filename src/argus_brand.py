@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# ARGUS product dark blue: #0B1F3A (RGB). OpenCV stores BGR.
-ARGUS_BLUE_RGB = (0x0B, 0x1F, 0x3A)
-ARGUS_BLUE_BGR = np.array((0x3A, 0x1F, 0x0B), dtype=np.float32)
+# ARGUS primary product blue: #2C55E6 (RGB). OpenCV stores BGR.
+ARGUS_BLUE_RGB = (0x2C, 0x55, 0xE6)
+ARGUS_BLUE_BGR = np.array((0xE6, 0x55, 0x2C), dtype=np.float32)
 _WHITE_BGR = np.array((255.0, 255.0, 255.0), dtype=np.float32)
 
 
@@ -123,7 +123,7 @@ def _wordmark(width, height):
     draw = ImageDraw.Draw(image)
     mask_draw = ImageDraw.Draw(mask_image)
 
-    argus_font, argus_box = _fit_font(draw, "ARGUS", width * 0.48,
+    argus_font, argus_box = _fit_font(draw, "Argus", width * 0.48,
                                       height * 0.20, bold=True)
     engineer_font, engineer_box = _fit_font(draw, "Engineer", width * 0.26,
                                             height * 0.074, bold=False)
@@ -140,9 +140,9 @@ def _wordmark(width, height):
     engineer_xy = ((width - engineer_width) / 2 - engineer_box[0],
                    top + argus_height + gap - engineer_box[1])
 
-    draw.text(argus_xy, "ARGUS", font=argus_font, fill=ARGUS_BLUE_RGB)
+    draw.text(argus_xy, "Argus", font=argus_font, fill=ARGUS_BLUE_RGB)
     draw.text(engineer_xy, "Engineer", font=engineer_font, fill=ARGUS_BLUE_RGB)
-    mask_draw.text(argus_xy, "ARGUS", font=argus_font, fill=255)
+    mask_draw.text(argus_xy, "Argus", font=argus_font, fill=255)
     mask_draw.text(engineer_xy, "Engineer", font=engineer_font, fill=255)
 
     final_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
@@ -189,7 +189,7 @@ def _smoothstep(value):
 
 
 def render_argus_outro(width, height, progress):
-    """Render asynchronous dots converging into the ARGUS Engineer lockup."""
+    """Render asynchronous dots converging into the Argus Engineer lockup."""
     p = float(np.clip(progress, 0.0, 1.0))
     final, mask, target, source, delay, curve, start_radius, end_radius = \
         _particle_plan(width, height)
