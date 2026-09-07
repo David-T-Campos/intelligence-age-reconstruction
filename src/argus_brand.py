@@ -13,17 +13,27 @@ _WHITE_BGR = np.array((255.0, 255.0, 255.0), dtype=np.float32)
 _BLACK_BGR = np.array((0.0, 0.0, 0.0), dtype=np.float32)
 
 
-def _border_luma(frame):
+def _border_pixels(frame):
     height, width = frame.shape[:2]
     band = max(1, min(height, width) // 32)
-    border = np.concatenate([
+    return np.concatenate([
         frame[:band].reshape(-1, 3),
         frame[-band:].reshape(-1, 3),
         frame[:, :band].reshape(-1, 3),
         frame[:, -band:].reshape(-1, 3),
     ], axis=0)
+
+
+def _border_luma(frame):
+    border = _border_pixels(frame)
     b, g, r = [border[:, i].astype(np.float32) for i in range(3)]
     return float(np.median(0.114 * b + 0.587 * g + 0.299 * r))
+
+
+def _border_is_colored(frame):
+    """True when the scene edge is chromatic rather than white/gray/black."""
+    median_bgr = np.median(_border_pixels(frame).astype(np.float32), axis=0)
+    return float(median_bgr.max() - median_bgr.min()) > 14.0
 
 
 def _recolor_isolated_white_marks(output, frame, neutral, tone):
@@ -65,23 +75,23 @@ def _recolor_isolated_white_marks(output, frame, neutral, tone):
 
 
 def recolor_black_dots(frame):
-    """Map neutral pointillist marks to ARGUS blue in both visual modes.
+    """Map neutral pointillist marks to ARGUS blue in every visual mode.
 
-    On light scenes, dark/black marks become blue while their antialiased edges
-    continue toward white. On dark scenes, bright/white marks become the same
-    ARGUS blue while their antialiased edges continue toward black. Isolated
-    white dots embedded in colored transition regions are also recolored, so the
-    pointillist language remains ARGUS blue through every light/dark inversion.
+    On white/light-neutral scenes, dark marks become blue while antialiasing
+    continues toward white. On black scenes *and on chromatic light backgrounds*,
+    bright/white marks become the same ARGUS blue while antialiasing continues
+    toward the surrounding dark/colored field. This prevents the dots from ever
+    flipping back to white during a light/dark or white/blue inversion.
     """
     output = frame.copy()
     signed = frame.astype(np.int16)
-    neutral = (signed.max(axis=2) - signed.min(axis=2)) <= 10
+    neutral = (signed.max(axis=2) - signed.min(axis=2)) <= 20
     tone = frame.mean(axis=2).astype(np.float32) / 255.0
-    dark_scene = _border_luma(frame) < 150
+    white_foreground_scene = _border_luma(frame) < 150 or _border_is_colored(frame)
 
-    if dark_scene:
-        # White/gray pointillist marks on dark backgrounds: black -> ARGUS blue.
-        # Scaling blue by source tone preserves antialiasing into the black field.
+    if white_foreground_scene:
+        # White/gray pointillist marks on dark or colored backgrounds -> blue.
+        # Scaling blue by source tone preserves antialiasing into the field.
         mask = neutral & (tone > 0.07)
         if np.any(mask):
             t = tone[mask, None]
@@ -89,16 +99,15 @@ def recolor_black_dots(frame):
             output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
         return output
 
-    # Black/gray pointillist marks on light backgrounds: ARGUS blue -> white.
+    # Black/gray pointillist marks on white/light-neutral backgrounds -> blue.
     mask = neutral & (tone < 0.93)
     if np.any(mask):
         t = tone[mask, None]
         mapped = ARGUS_BLUE_BGR[None, :] * (1.0 - t) + _WHITE_BGR[None, :] * t
         output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
 
-    # Some transition shots have a light page border but blue regions containing
-    # white dots. Catch those isolated white components without touching the
-    # large white background component.
+    # Some light-neutral shots contain colored subregions with white dots. Catch
+    # those isolated white components without touching the large white page.
     return _recolor_isolated_white_marks(output, frame, neutral, tone)
 
 
