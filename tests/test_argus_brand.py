@@ -15,7 +15,7 @@ class ArgusBrandTests(unittest.TestCase):
         frame = np.full((120, 160, 3), 255, np.uint8)
         cv2.circle(frame, (80, 60), 20, (0, 0, 0), -1, cv2.LINE_AA)
         recolored = recolor_black_dots(frame)
-        self.assertEqual(tuple(recolored[60, 80]), (58, 31, 11))  # BGR #0B1F3A
+        self.assertEqual(tuple(recolored[60, 80]), (230, 85, 44))  # BGR #2C55E6
         self.assertEqual(tuple(recolored[0, 0]), (255, 255, 255))
 
     def test_white_dots_on_black_background_stay_unchanged(self):
