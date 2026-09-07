@@ -11,64 +11,64 @@ ARGUS_BLUE_RGB = (0x2C, 0x55, 0xE6)
 ARGUS_BLUE_BGR = np.array((0xE6, 0x55, 0x2C), dtype=np.float32)
 
 
-def _border_pixels(frame):
-    height, width = frame.shape[:2]
-    band = max(1, min(height, width) // 32)
-    return np.concatenate([
-        frame[:band].reshape(-1, 3),
-        frame[-band:].reshape(-1, 3),
-        frame[:, :band].reshape(-1, 3),
-        frame[:, -band:].reshape(-1, 3),
-    ], axis=0)
+def _dot_components(core_mask):
+    """Keep dot/pointillist components while rejecting page/field components.
 
+    White and black backgrounds are usually enormous connected components and
+    often touch the frame edge. Pointillist marks are bounded components, even
+    when many neighboring dots merge into a larger illustrated region.
+    """
+    binary = core_mask.astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if count <= 1:
+        return np.zeros_like(core_mask, dtype=bool)
 
-def _background_bgr(frame):
-    """Estimate the current flat field from the image perimeter."""
-    return np.median(_border_pixels(frame).astype(np.float32), axis=0)
+    height, width = core_mask.shape
+    max_area = int(height * width * 0.24)
+    tiny_border_area = int(height * width * 0.008)
+
+    border_labels = np.unique(np.concatenate([
+        labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]
+    ]))
+    touches_border = np.zeros(count, dtype=bool)
+    touches_border[border_labels] = True
+
+    areas = stats[:, cv2.CC_STAT_AREA]
+    eligible = (areas > 0) & (areas <= max_area)
+    # A tiny dot is still a dot if it happens to graze the edge; only reject
+    # border-connected components once they are large enough to be a field.
+    eligible &= (~touches_border) | (areas <= tiny_border_area)
+    eligible[0] = False
+    return eligible[labels]
 
 
 def recolor_black_dots(frame):
-    """Keep the pointillist foreground ARGUS blue through every inversion.
+    """Recolor both black and white pointillist marks to ARGUS blue.
 
-    The original film continuously flips between dark marks on a light field,
-    bright marks on a dark field, and intermediate gray/color transition fields.
-    A fixed black-only or white-only threshold therefore fails during inversions.
-
-    Instead, estimate the current background from the frame perimeter and recolor
-    neutral foreground marks according to their contrast from that background.
-    The background itself stays untouched, while black dots, white dots and their
-    antialiased gray edges all converge on the same ARGUS blue (#2C55E6).
+    The film inverts foreground/background repeatedly. We therefore identify
+    *both* bright and dark neutral components, reject the large background/field
+    components, and map every retained dot core to #2C55E6. A small soft expansion
+    carries the color through antialiased edges without tinting white, gray, black,
+    or colored fields themselves.
     """
     source = frame.astype(np.float32)
-    output = source.copy()
-    background = _background_bgr(frame)
-
-    # The pointillist artwork is essentially neutral before branding. Allow a
-    # little chroma for H.264/upscale ringing so white dots do not slip through.
     spread = source.max(axis=2) - source.min(axis=2)
-    neutral = spread <= 28.0
+    neutral = spread <= 32.0
 
     b, g, r = [source[:, :, i] for i in range(3)]
     tone = (0.114 * b + 0.587 * g + 0.299 * r) / 255.0
-    bg_b, bg_g, bg_r = [float(background[i]) for i in range(3)]
-    bg_tone = (0.114 * bg_b + 0.587 * bg_g + 0.299 * bg_r) / 255.0
 
-    # Luma contrast handles white<->black inversions. RGB distance also catches
-    # neutral white/black dots sitting on a colored (for example pale-blue) field.
-    luma_contrast = np.abs(tone - bg_tone)
-    rgb_contrast = np.linalg.norm(source - background[None, None, :], axis=2) / (255.0 * np.sqrt(3.0))
-    contrast = np.maximum(luma_contrast, rgb_contrast)
-
-    # Ignore tiny codec/background fluctuations. Above ~19% contrast the mark is
-    # treated as a full foreground dot; lower-contrast antialiasing blends smoothly.
-    strength = np.clip((contrast - 0.03) / 0.16, 0.0, 1.0)
-    strength = strength * strength * (3.0 - 2.0 * strength)
-    mask = neutral & (strength > 0.0)
-    if not np.any(mask):
+    bright_core = neutral & (tone >= 0.72)
+    dark_core = neutral & (tone <= 0.28)
+    core = _dot_components(bright_core) | _dot_components(dark_core)
+    if not np.any(core):
         return frame.copy()
 
-    alpha = strength[mask, None]
-    output[mask] = source[mask] * (1.0 - alpha) + ARGUS_BLUE_BGR[None, :] * alpha
+    core_f = core.astype(np.float32)
+    soft = cv2.GaussianBlur(core_f, (0, 0), sigmaX=1.25, sigmaY=1.25)
+    alpha = np.maximum(core_f, np.clip(soft * 0.90, 0.0, 0.82))[:, :, None]
+
+    output = source * (1.0 - alpha) + ARGUS_BLUE_BGR[None, None, :] * alpha
     return np.clip(np.rint(output), 0, 255).astype(np.uint8)
 
 
