@@ -31,8 +31,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt yt-dlp
+          python -m pip install -r requirements.txt "yt-dlp[default,curl-cffi]"
           ffmpeg -version | head -n 1
+          python -m yt_dlp --version
 
       - name: Download exact public reference film
         shell: bash
@@ -42,8 +43,8 @@ jobs:
           rm -f reference/original-60s.mp4
 
           sources=(
-            "https://www.youtube.com/watch?v=kIhb5pEo_j0"
             "https://lbbonline.com/work/128338"
+            "https://www.youtube.com/watch?v=kIhb5pEo_j0"
             "https://www.youtube.com/watch?v=N9NeQi2pE7U"
             "https://www.youtube.com/watch?v=Z0rZqS_hE3I"
             "https://vimeo.com/1055260932/1225af8c69"
@@ -56,6 +57,7 @@ jobs:
             if python -m yt_dlp \
                 "$url" \
                 -f "bv*[height<=1080]+ba/b[height<=1080]" \
+                --extractor-args "generic:impersonate" \
                 --extractor-args "youtube:player_client=web_safari,web,tv" \
                 --merge-output-format mp4 \
                 --remux-video mp4 \
