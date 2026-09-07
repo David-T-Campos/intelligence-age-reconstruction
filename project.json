@@ -1,0 +1,17 @@
+{
+  "title": "The Intelligence Age - 60-second reconstruction",
+  "method": "source-assisted lossless grayscale and RGB contour tracing",
+  "reference": "reference/original-60s.mp4",
+  "source_page": "https://builders-club.com/projects/openai-the-intelligence-age",
+  "source_video": "https://vimeo.com/1055260932/1225af8c69",
+  "start_frame": 0,
+  "frame_count": 1440,
+  "fps": 24,
+  "width": 1920,
+  "height": 1080,
+  "audio": "assets/full60/audio.wav",
+  "frames": "assets/full60/frames",
+  "notes": "Source-assisted frame-by-frame contour reconstruction. Supply your own reference video; the original soundtrack is reused locally.",
+  "output_name": "recreated-full60",
+  "report_dir": "reports/full60"
+}
