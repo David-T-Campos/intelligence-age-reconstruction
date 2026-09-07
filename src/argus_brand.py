@@ -9,8 +9,6 @@ from PIL import Image, ImageDraw, ImageFont
 # ARGUS primary product blue: #2C55E6 (RGB). OpenCV stores BGR.
 ARGUS_BLUE_RGB = (0x2C, 0x55, 0xE6)
 ARGUS_BLUE_BGR = np.array((0xE6, 0x55, 0x2C), dtype=np.float32)
-_WHITE_BGR = np.array((255.0, 255.0, 255.0), dtype=np.float32)
-_BLACK_BGR = np.array((0.0, 0.0, 0.0), dtype=np.float32)
 
 
 def _border_pixels(frame):
@@ -24,91 +22,54 @@ def _border_pixels(frame):
     ], axis=0)
 
 
-def _border_luma(frame):
-    border = _border_pixels(frame)
-    b, g, r = [border[:, i].astype(np.float32) for i in range(3)]
-    return float(np.median(0.114 * b + 0.587 * g + 0.299 * r))
-
-
-def _border_is_colored(frame):
-    """True when the scene edge is chromatic rather than white/gray/black."""
-    median_bgr = np.median(_border_pixels(frame).astype(np.float32), axis=0)
-    return float(median_bgr.max() - median_bgr.min()) > 14.0
-
-
-def _recolor_isolated_white_marks(output, frame, neutral, tone):
-    """Catch white dots that sit inside blue/colored regions on otherwise light frames.
-
-    A global bright-pixel replacement would turn the white page/background blue.
-    Instead, label neutral bright components, keep only reasonably small components
-    that contain a genuinely white core, and recolor those marks to ARGUS blue.
-    """
-    candidate = neutral & (tone > 0.10)
-    core = neutral & (tone > 0.72)
-    if not np.any(core):
-        return output
-
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(
-        candidate.astype(np.uint8), connectivity=8
-    )
-    if count <= 1:
-        return output
-
-    max_area = max(256, int(frame.shape[0] * frame.shape[1] * 0.03))
-    core_labels = np.unique(labels[core])
-    eligible = np.zeros(count, dtype=bool)
-    for label in core_labels:
-        if label == 0:
-            continue
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        if 0 < area <= max_area:
-            eligible[label] = True
-
-    mask = eligible[labels]
-    if not np.any(mask):
-        return output
-
-    t = tone[mask, None]
-    mapped = _BLACK_BGR[None, :] * (1.0 - t) + ARGUS_BLUE_BGR[None, :] * t
-    output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
-    return output
+def _background_bgr(frame):
+    """Estimate the current flat field from the image perimeter."""
+    return np.median(_border_pixels(frame).astype(np.float32), axis=0)
 
 
 def recolor_black_dots(frame):
-    """Map neutral pointillist marks to ARGUS blue in every visual mode.
+    """Keep the pointillist foreground ARGUS blue through every inversion.
 
-    On white/light-neutral scenes, dark marks become blue while antialiasing
-    continues toward white. On black scenes *and on chromatic light backgrounds*,
-    bright/white marks become the same ARGUS blue while antialiasing continues
-    toward the surrounding dark/colored field. This prevents the dots from ever
-    flipping back to white during a light/dark or white/blue inversion.
+    The original film continuously flips between dark marks on a light field,
+    bright marks on a dark field, and intermediate gray/color transition fields.
+    A fixed black-only or white-only threshold therefore fails during inversions.
+
+    Instead, estimate the current background from the frame perimeter and recolor
+    neutral foreground marks according to their contrast from that background.
+    The background itself stays untouched, while black dots, white dots and their
+    antialiased gray edges all converge on the same ARGUS blue (#2C55E6).
     """
-    output = frame.copy()
-    signed = frame.astype(np.int16)
-    neutral = (signed.max(axis=2) - signed.min(axis=2)) <= 20
-    tone = frame.mean(axis=2).astype(np.float32) / 255.0
-    white_foreground_scene = _border_luma(frame) < 150 or _border_is_colored(frame)
+    source = frame.astype(np.float32)
+    output = source.copy()
+    background = _background_bgr(frame)
 
-    if white_foreground_scene:
-        # White/gray pointillist marks on dark or colored backgrounds -> blue.
-        # Scaling blue by source tone preserves antialiasing into the field.
-        mask = neutral & (tone > 0.07)
-        if np.any(mask):
-            t = tone[mask, None]
-            mapped = _BLACK_BGR[None, :] * (1.0 - t) + ARGUS_BLUE_BGR[None, :] * t
-            output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
-        return output
+    # The pointillist artwork is essentially neutral before branding. Allow a
+    # little chroma for H.264/upscale ringing so white dots do not slip through.
+    spread = source.max(axis=2) - source.min(axis=2)
+    neutral = spread <= 28.0
 
-    # Black/gray pointillist marks on white/light-neutral backgrounds -> blue.
-    mask = neutral & (tone < 0.93)
-    if np.any(mask):
-        t = tone[mask, None]
-        mapped = ARGUS_BLUE_BGR[None, :] * (1.0 - t) + _WHITE_BGR[None, :] * t
-        output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
+    b, g, r = [source[:, :, i] for i in range(3)]
+    tone = (0.114 * b + 0.587 * g + 0.299 * r) / 255.0
+    bg_b, bg_g, bg_r = [float(background[i]) for i in range(3)]
+    bg_tone = (0.114 * bg_b + 0.587 * bg_g + 0.299 * bg_r) / 255.0
 
-    # Some light-neutral shots contain colored subregions with white dots. Catch
-    # those isolated white components without touching the large white page.
-    return _recolor_isolated_white_marks(output, frame, neutral, tone)
+    # Luma contrast handles white<->black inversions. RGB distance also catches
+    # neutral white/black dots sitting on a colored (for example pale-blue) field.
+    luma_contrast = np.abs(tone - bg_tone)
+    rgb_contrast = np.linalg.norm(source - background[None, None, :], axis=2) / (255.0 * np.sqrt(3.0))
+    contrast = np.maximum(luma_contrast, rgb_contrast)
+
+    # Ignore tiny codec/background fluctuations. Above ~19% contrast the mark is
+    # treated as a full foreground dot; lower-contrast antialiasing blends smoothly.
+    strength = np.clip((contrast - 0.03) / 0.16, 0.0, 1.0)
+    strength = strength * strength * (3.0 - 2.0 * strength)
+    mask = neutral & (strength > 0.0)
+    if not np.any(mask):
+        return frame.copy()
+
+    alpha = strength[mask, None]
+    output[mask] = source[mask] * (1.0 - alpha) + ARGUS_BLUE_BGR[None, :] * alpha
+    return np.clip(np.rint(output), 0, 255).astype(np.uint8)
 
 
 def _blue_fraction(frame):
@@ -245,11 +206,6 @@ def _particle_plan(width, height):
     end_radius = rng.uniform(max(2, step * 0.22),
                              max(3, step * 0.34), count).astype(np.float32)
     return final, mask, target, source, delay, curve, start_radius, end_radius
-
-
-def _smoothstep(value):
-    value = np.clip(value, 0.0, 1.0)
-    return value * value * (3.0 - 2.0 * value)
 
 
 def _smootherstep(value):
