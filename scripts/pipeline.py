@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import cv2
 import numpy as np
 from contours import trace_frame, rasterize_frame, save, load, dot_summary
+from argus_brand import apply_argus_brand, detect_outro_start
 
 
 def configuration():
@@ -113,6 +114,11 @@ def frame_at(index, config):
     return rasterize_frame(load(ROOT / config["frames"] / f"{index:06d}.npz"))
 
 
+def brand_outro_start(config):
+    return detect_outro_start(config["frame_count"], config["fps"],
+                              lambda index: frame_at(index, config))
+
+
 def render(args):
     # Intentionally never opens config['reference']; this is also verified by a
     # complete render in a separate project with no reference video.
@@ -126,6 +132,8 @@ def render(args):
     for index in range(count):
         if not (ROOT / config["frames"] / f"{index:06d}.npz").is_file():
             raise ValueError(f"Missing geometry frame {index}; run extract first")
+    outro_start = brand_outro_start(config)
+    print(f"ARGUS outro begins at frame {outro_start} ({outro_start / fps:.3f}s)", flush=True)
     destination = output_path(config, "-lossless.mkv")
     destination.parent.mkdir(parents=True, exist_ok=True)
     command = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pixel_format", "bgr24",
@@ -136,12 +144,12 @@ def render(args):
     process = subprocess.Popen(command, stdin=subprocess.PIPE)
     try:
         for i in range(count):
-            frame = frame_at(i, config)
+            frame = apply_argus_brand(frame_at(i, config), i, count, outro_start)
             if frame.shape != (height, width, 3):
                 raise ValueError(f"Frame {i} has wrong size")
             process.stdin.write(frame.tobytes())
             if (i + 1) % 24 == 0:
-                print(f"render {i + 1}/{count} from geometry", flush=True)
+                print(f"render {i + 1}/{count} from geometry + ARGUS brand layer", flush=True)
         process.stdin.close()
         if process.wait() != 0:
             raise RuntimeError("ffmpeg lossless render failed")
@@ -156,7 +164,7 @@ def render(args):
          "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
          "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart",
          str(output_path(config))])
-    print("Lossless master and compatible MP4 ready", flush=True)
+    print("Lossless ARGUS master and compatible MP4 ready", flush=True)
 
 
 def compare(args):
@@ -167,6 +175,7 @@ def compare(args):
     master = cv2.VideoCapture(str(output_path(config, "-lossless.mkv")))
     delivery = cv2.VideoCapture(str(output_path(config)))
     manifest = json.loads(((ROOT / config["frames"]).parent / "manifest.json").read_text())
+    outro_start = brand_outro_start(config)
     per_frame = []
     for i in range(config["frame_count"]):
         ok1, original = source.read()
@@ -174,20 +183,23 @@ def compare(args):
         ok3, mp4 = delivery.read()
         if not (ok1 and ok2 and ok3):
             raise AssertionError(f"Missing decoded frame {i}")
-        gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-        # The master has just been independently rendered from the geometry.
-        # Verify that decoded output against the extraction hash and reference;
-        # do not redundantly rasterize the complete geometry sequence again.
-        matches_extraction = hashlib.sha256(rebuilt.tobytes()).hexdigest() == manifest["frames"][i]["bgr_sha256"]
-        if not matches_extraction:
-            raise AssertionError(f"Rendered geometry hash mismatch {i}")
-        master_difference = np.abs(original.astype(np.int16) - rebuilt.astype(np.int16))
-        delivery_difference = np.abs(original.astype(np.int16) - mp4.astype(np.int16))
+
+        base = frame_at(i, config)
+        matches_extraction = hashlib.sha256(base.tobytes()).hexdigest() == manifest["frames"][i]["bgr_sha256"]
+        source_difference = np.abs(original.astype(np.int16) - base.astype(np.int16))
+        geometry_identical = bool(matches_extraction and
+                                  manifest["frames"][i]["max_pixel_error"] == 0 and
+                                  source_difference.max() == 0)
+
+        expected = apply_argus_brand(base, i, config["frame_count"], outro_start)
+        gray = cv2.cvtColor(expected, cv2.COLOR_BGR2GRAY)
+        master_difference = np.abs(expected.astype(np.int16) - rebuilt.astype(np.int16))
+        delivery_difference = np.abs(expected.astype(np.int16) - mp4.astype(np.int16))
         mse = float(np.mean(delivery_difference.astype(np.float32) ** 2))
         score = float(structural_similarity(gray, cv2.cvtColor(mp4, cv2.COLOR_BGR2GRAY), data_range=255))
         per_frame.append({
             "frame": i, "time": i / config["fps"],
-            "geometry_identical": bool(matches_extraction and manifest["frames"][i]["max_pixel_error"] == 0),
+            "geometry_identical": geometry_identical,
             "master_max_error": int(master_difference.max()),
             "master_different_pixels": int(np.count_nonzero(master_difference.max(axis=2))),
             "mp4_max_channel_error": int(delivery_difference.max()),
@@ -205,8 +217,11 @@ def compare(args):
     mse = float(np.mean([f["mp4_mse"] for f in per_frame]))
     results = {
         "frame_count": len(per_frame), "fps": config["fps"],
+        "argus_blue": "#0B1F3A",
+        "argus_outro_start_frame": outro_start,
+        "argus_outro_start_seconds": outro_start / config["fps"],
         "geometry_all_frames_identical": all(f["geometry_identical"] for f in per_frame),
-        "master_all_frames_identical": all(f["master_max_error"] == 0 for f in per_frame),
+        "master_all_frames_identical_to_argus_target": all(f["master_max_error"] == 0 for f in per_frame),
         "master_max_pixel_error": max(f["master_max_error"] for f in per_frame),
         "delivery_mean_ssim": float(np.mean([f["mp4_ssim"] for f in per_frame])),
         "delivery_min_ssim": min(f["mp4_ssim"] for f in per_frame),
@@ -217,8 +232,8 @@ def compare(args):
     }
     report_path(config, "metrics.json").write_text(json.dumps(results, indent=2))
     print(json.dumps({k: v for k, v in results.items() if k != "frames"}, indent=2), flush=True)
-    if not results["geometry_all_frames_identical"] or not results["master_all_frames_identical"]:
-        raise AssertionError("Lossless reconstruction did not meet exact-match acceptance")
+    if not results["geometry_all_frames_identical"] or not results["master_all_frames_identical_to_argus_target"]:
+        raise AssertionError("ARGUS render did not meet exact-match acceptance")
 
 
 def inspect(args):
@@ -226,8 +241,11 @@ def inspect(args):
     index = args.frame
     if index < 0 or index >= config["frame_count"]:
         raise ValueError("Frame outside configured range")
+    outro_start = brand_outro_start(config)
     destination = report_path(config, f"reconstructed-{index:06d}.png")
-    cv2.imwrite(str(destination), frame_at(index, config))
+    frame = apply_argus_brand(frame_at(index, config), index,
+                              config["frame_count"], outro_start)
+    cv2.imwrite(str(destination), frame)
     print(destination)
 
 

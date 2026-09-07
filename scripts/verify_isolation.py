@@ -16,6 +16,7 @@ stage = ROOT / "work" / ("render-without-reference-" + stem)
 for name in ["src", "scripts", "renders"]:
     (stage / name).mkdir(parents=True, exist_ok=True)
 shutil.copy2(ROOT / "src/contours.py", stage / "src/contours.py")
+shutil.copy2(ROOT / "src/argus_brand.py", stage / "src/argus_brand.py")
 shutil.copy2(ROOT / "scripts/pipeline.py", stage / "scripts/pipeline.py")
 config = json.loads((ROOT / "project.json").read_text())
 config["reference"] = "reference/INTENTIONALLY-ABSENT.mp4"
@@ -34,7 +35,7 @@ report = {
     "passed": True,
     "reference_directory_present": False,
     "reference_in_config": config["reference"],
-    "visual_input": initial_config["frames"] + ": integer-grid contours, no bitmap/video textures",
+    "visual_input": initial_config["frames"] + ": integer-grid contours plus deterministic ARGUS brand transform",
     "audio_input": initial_config["audio"] + ": original audio",
     "identical_to_previous_mp4": previous_hash == rebuilt_hash if previous_hash else None,
     "mp4_sha256": rebuilt_hash,
