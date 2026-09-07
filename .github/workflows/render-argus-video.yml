@@ -42,34 +42,15 @@ jobs:
           mkdir -p reference/download
           rm -f reference/original-60s.mp4
 
-          sources=(
-            "https://lbbonline.com/work/128338"
-            "https://www.youtube.com/watch?v=kIhb5pEo_j0"
-            "https://www.youtube.com/watch?v=N9NeQi2pE7U"
-            "https://www.youtube.com/watch?v=Z0rZqS_hE3I"
-            "https://vimeo.com/1055260932/1225af8c69"
-          )
-
-          accepted=0
-          for url in "${sources[@]}"; do
-            echo "Trying reference source: $url"
-            rm -rf reference/download/*
-            if python -m yt_dlp \
-                "$url" \
-                -f "bv*[height<=1080]+ba/b[height<=1080]" \
-                --extractor-args "generic:impersonate" \
-                --extractor-args "youtube:player_client=web_safari,web,tv" \
-                --merge-output-format mp4 \
-                --remux-video mp4 \
-                -o "reference/download/candidate.%(ext)s"; then
-              candidate="$(find reference/download -maxdepth 1 -type f | head -n 1)"
-              if [ -n "$candidate" ]; then
-                width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$candidate")"
-                height="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$candidate")"
-                fps="$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 "$candidate")"
-                duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$candidate")"
-                echo "Candidate metadata: ${width}x${height}, fps=${fps}, duration=${duration}"
-                if python - "$width" "$height" "$fps" "$duration" <<'PY'
+          validate_candidate() {
+            candidate="$1"
+            [ -f "$candidate" ] || return 1
+            width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$candidate")"
+            height="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$candidate")"
+            fps="$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 "$candidate")"
+            duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$candidate")"
+            echo "Candidate metadata: ${width}x${height}, fps=${fps}, duration=${duration}"
+            python - "$width" "$height" "$fps" "$duration" <<'PY'
           import sys
           w, h = int(sys.argv[1]), int(sys.argv[2])
           num, den = map(float, sys.argv[3].split('/'))
@@ -78,15 +59,52 @@ jobs:
           ok = w == 1920 and h == 1080 and 23.90 <= fps <= 24.10 and 59.0 <= duration <= 61.5
           raise SystemExit(0 if ok else 1)
           PY
-                then
+          }
+
+          accepted=0
+          hls="https://player.vimeo.com/external/1128117661.m3u8?s=800251362650a93a1103fae9b5d121fb8750e170&logging=false"
+          echo "Trying direct public HLS reference"
+          rm -rf reference/download/*
+          if ffmpeg -hide_banner -loglevel warning -y \
+              -user_agent "Mozilla/5.0" -i "$hls" \
+              -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart \
+              reference/download/candidate.mp4; then
+            if validate_candidate reference/download/candidate.mp4; then
+              mv reference/download/candidate.mp4 reference/original-60s.mp4
+              accepted=1
+              echo "Accepted direct HLS reference"
+            fi
+          fi
+
+          if [ "$accepted" -ne 1 ]; then
+            sources=(
+              "https://lbbonline.com/work/128338"
+              "https://www.youtube.com/watch?v=kIhb5pEo_j0"
+              "https://www.youtube.com/watch?v=N9NeQi2pE7U"
+              "https://www.youtube.com/watch?v=Z0rZqS_hE3I"
+              "https://vimeo.com/1055260932/1225af8c69"
+            )
+            for url in "${sources[@]}"; do
+              echo "Trying reference source: $url"
+              rm -rf reference/download/*
+              if python -m yt_dlp \
+                  "$url" \
+                  -f "bv*[height<=1080]+ba/b[height<=1080]" \
+                  --extractor-args "generic:impersonate" \
+                  --extractor-args "youtube:player_client=web_safari,web,tv" \
+                  --merge-output-format mp4 \
+                  --remux-video mp4 \
+                  -o "reference/download/candidate.%(ext)s"; then
+                candidate="$(find reference/download -maxdepth 1 -type f | head -n 1)"
+                if [ -n "$candidate" ] && validate_candidate "$candidate"; then
                   mv "$candidate" reference/original-60s.mp4
                   accepted=1
                   echo "Accepted reference source: $url"
                   break
                 fi
               fi
-            fi
-          done
+            done
+          fi
 
           if [ "$accepted" -ne 1 ]; then
             echo "No candidate matched the required 1920x1080 / 24 fps / ~60 s reference." >&2
