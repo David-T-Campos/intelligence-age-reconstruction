@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 ARGUS_BLUE_RGB = (0x2C, 0x55, 0xE6)
 ARGUS_BLUE_BGR = np.array((0xE6, 0x55, 0x2C), dtype=np.float32)
 _WHITE_BGR = np.array((255.0, 255.0, 255.0), dtype=np.float32)
+_BLACK_BGR = np.array((0.0, 0.0, 0.0), dtype=np.float32)
 
 
 def _border_luma(frame):
@@ -26,25 +27,36 @@ def _border_luma(frame):
 
 
 def recolor_black_dots(frame):
-    """Map neutral dark marks on light scenes from black to ARGUS blue.
+    """Map neutral pointillist marks to ARGUS blue in both visual modes.
 
-    Dark-background scenes are deliberately left alone so white dots remain white
-    on black, matching the request to replace the black dots rather than globally
-    tinting the whole film.
+    On light scenes, dark/black marks become blue while their antialiased edges
+    continue toward white. On dark scenes, bright/white marks become the same
+    ARGUS blue while their antialiased edges continue toward black. This keeps
+    the dots blue through the film's light/dark inversions instead of allowing
+    them to flip back to white.
     """
     output = frame.copy()
-    if _border_luma(frame) < 150:
-        return output
-
     signed = frame.astype(np.int16)
     neutral = (signed.max(axis=2) - signed.min(axis=2)) <= 10
     tone = frame.mean(axis=2).astype(np.float32) / 255.0
-    mask = neutral & (tone < 0.93)
-    if not np.any(mask):
-        return output
+    dark_scene = _border_luma(frame) < 150
 
-    t = tone[mask, None]
-    mapped = ARGUS_BLUE_BGR[None, :] * (1.0 - t) + _WHITE_BGR[None, :] * t
+    if dark_scene:
+        # White/gray pointillist marks on dark backgrounds: black -> ARGUS blue.
+        # Scaling blue by source tone preserves antialiasing into the black field.
+        mask = neutral & (tone > 0.07)
+        if not np.any(mask):
+            return output
+        t = tone[mask, None]
+        mapped = _BLACK_BGR[None, :] * (1.0 - t) + ARGUS_BLUE_BGR[None, :] * t
+    else:
+        # Black/gray pointillist marks on light backgrounds: ARGUS blue -> white.
+        mask = neutral & (tone < 0.93)
+        if not np.any(mask):
+            return output
+        t = tone[mask, None]
+        mapped = ARGUS_BLUE_BGR[None, :] * (1.0 - t) + _WHITE_BGR[None, :] * t
+
     output[mask] = np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
     return output
 
@@ -174,9 +186,11 @@ def _particle_plan(width, height):
     source[:, 0] = np.clip(source[:, 0], 20, width - 20)
     source[:, 1] = np.clip(source[:, 1], 20, height - 20)
 
-    delay = rng.uniform(0.0, 0.34, count).astype(np.float32)
-    curve = rng.uniform(-min(width, height) * 0.14,
-                        min(width, height) * 0.14, count).astype(np.float32)
+    # Keep the asynchronous feel, but reduce the delay spread and arc size so
+    # adjacent 24 fps frames flow more continuously into the final lockup.
+    delay = rng.uniform(0.0, 0.22, count).astype(np.float32)
+    curve = rng.uniform(-min(width, height) * 0.10,
+                        min(width, height) * 0.10, count).astype(np.float32)
     start_radius = rng.uniform(1.5, 4.5, count).astype(np.float32)
     end_radius = rng.uniform(max(2, step * 0.22),
                              max(3, step * 0.34), count).astype(np.float32)
@@ -188,18 +202,29 @@ def _smoothstep(value):
     return value * value * (3.0 - 2.0 * value)
 
 
+def _smootherstep(value):
+    """Quintic ease with zero velocity and acceleration at both endpoints."""
+    value = np.clip(value, 0.0, 1.0)
+    return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
+
+
 def render_argus_outro(width, height, progress):
-    """Render asynchronous dots converging into the Argus Engineer lockup."""
+    """Render fluid asynchronous dots converging into the Argus Engineer lockup."""
     p = float(np.clip(progress, 0.0, 1.0))
     final, mask, target, source, delay, curve, start_radius, end_radius = \
         _particle_plan(width, height)
-    if p >= 0.92:
+    if p >= 0.95:
         return final.copy()
 
-    frame = np.full((height, width, 3), 255, dtype=np.uint8)
+    white = np.full((height, width, 3), 255, dtype=np.uint8)
+    frame = white.copy()
     color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
-    local = (p - delay) / np.maximum(0.001, 0.67 - delay)
-    eased = _smoothstep(local)
+
+    # Each particle gets a slightly different start, but all settle gently by
+    # roughly the same phase instead of stopping early and then snapping away.
+    arrival = 0.80 + delay * 0.10
+    local = (p - delay) / np.maximum(0.001, arrival - delay)
+    eased = _smootherstep(local)
     visible = p > delay
 
     delta = target - source
@@ -217,9 +242,16 @@ def render_argus_outro(width, height, progress):
                    max(1, int(round(radius[particle]))),
                    color, -1, cv2.LINE_AA)
 
-    # Every letter resolves together: particles fade into the final wordmark,
-    # rather than revealing characters sequentially like typing.
-    merge = float(_smoothstep((p - 0.72) / 0.20))
+    # Fade the free particles away only as the complete wordmark resolves.
+    # This removes the previous hard disappearance near the end of the morph.
+    particle_fade = float(_smootherstep((p - 0.76) / 0.19))
+    if particle_fade > 0.0:
+        frame = np.clip(frame.astype(np.float32) * (1.0 - particle_fade) +
+                        white.astype(np.float32) * particle_fade,
+                        0, 255).astype(np.uint8)
+
+    # Every letter resolves together (not character-by-character / typing).
+    merge = float(_smootherstep((p - 0.72) / 0.23))
     if merge > 0.0:
         alpha = (mask.astype(np.float32) / 255.0 * merge)[:, :, None]
         frame = np.clip(frame.astype(np.float32) * (1.0 - alpha) +
