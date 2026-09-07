@@ -83,6 +83,13 @@ jobs:
 
       - name: Render and validate every frame
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/render_argus_direct.py")
+          text = path.read_text()
+          text = text.replace(', "-profile:v", "high"', '')
+          path.write_text(text)
+          PY
           python scripts/render_argus_direct.py
 
       - name: Show QA summary
