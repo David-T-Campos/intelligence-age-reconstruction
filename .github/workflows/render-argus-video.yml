@@ -7,6 +7,7 @@ on:
       - "src/argus_brand.py"
       - "scripts/render_argus_direct.py"
       - "scripts/patch_argus_outro.py"
+      - "scripts/patch_argus_motion_continuity.py"
       - "tests/test_argus_brand.py"
       - ".github/workflows/render-argus-video.yml"
   workflow_dispatch:
@@ -89,6 +90,7 @@ jobs:
       - name: Apply final ARGUS outro treatment
         run: |
           python scripts/patch_argus_outro.py
+          python scripts/patch_argus_motion_continuity.py
           python -m unittest discover -s tests -p "test_argus_brand.py"
 
       - name: Render and validate every frame
