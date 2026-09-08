@@ -17,8 +17,8 @@ def patch_renderer():
     text = text.replace(
         'return result if result is not None else max(0, count - round(fps * 3.5))',
         'detected = result if result is not None else max(0, count - round(fps * 3.5))\n'
-        '    # Take over two frames later than the previous revision so the\n'
-        '    # source film gets a tiny natural hold on its intact blue circle.\n'
+        '    # Leave the source film two extra frames to finish the intact-circle\n'
+        '    # beat before ARGUS takes over. At 24 fps this is about 83 ms.\n'
         '    return max(0, detected - round(fps * 0.42))'
     )
     text = text.replace(
@@ -55,43 +55,71 @@ def patch_brand():
     replacement = textwrap.dedent(r'''
         @lru_cache(maxsize=8)
         def _particle_plan(width, height):
-            """Plan an exact circular source that coherently becomes the wordmark."""
+            """Plan a connected circular dot field that coherently becomes ARGUS."""
             mask = _wordmark(width, height)
 
-            # Final lettering remains permanently pointillist.
+            # The final lettering remains permanently pointillist.
             step = max(9, round(min(width, height) * 0.0105))
             ys, xs = np.mgrid[step // 2:height:step, step // 2:width:step]
             flat_x, flat_y = xs.ravel(), ys.ravel()
             inside = mask[flat_y, flat_x] > 96
             target = np.stack([flat_x[inside], flat_y[inside]], axis=1).astype(np.float32)
 
-            center = np.array([width / 2, height / 2], dtype=np.float32)
-            initial_radius = float(min(width, height) * 0.082)
+            # The source film's last intact blue circle is centered on the half-pixel
+            # center of the 1920x1080 raster (959.5, 539.5), not (960, 540).
+            center = np.array([(width - 1) / 2.0, (height - 1) / 2.0],
+                              dtype=np.float32)
+            initial_radius = float(min(width, height) * 0.0811)
 
-            # Build a clean hexagonal source field inside the exact same radius as
-            # the original solid blue circle. The old 0.87-radius source was what
-            # produced the visibly smaller dotted disk in the user's screenshot.
-            source_step = max(8.0, min(width, height) * 0.00835)
-            source_dot_radius = max(2.5, source_step * 0.30)
-            rows = []
-            y = -initial_radius
-            row = 0
-            dy = source_step * np.sqrt(3.0) / 2.0
-            limit = initial_radius - source_dot_radius * 0.55
-            while y <= initial_radius:
-                offset = (source_step * 0.5) if (row % 2) else 0.0
-                x = -initial_radius + offset
-                while x <= initial_radius:
-                    if x * x + y * y <= limit * limit:
-                        rows.append((center[0] + x, center[1] + y))
-                    x += source_step
-                y += dy
-                row += 1
-            source_nodes = np.asarray(rows, dtype=np.float32)
+            # Concentric rings give a genuinely circular outer envelope. The circles
+            # intentionally OVERLAP, just like the connected-circle shapes earlier
+            # in the film. There is no solid mask, alpha fill, clipping disk, or
+            # pale backing layer: the disk is blue because neighboring circles
+            # physically overlap and become one connected blue shape.
+            source_spacing = float(min(width, height) * 0.00519)  # ~5.6 px at 1080p
+            radial_step = source_spacing * 0.82
+            connected_radius = source_spacing * 0.88
+            separated_radius = source_spacing * 0.43
 
-            # Map the larger final particle set onto the circular field by polar
-            # order. Several final points may share one source node, so the dots
-            # visibly split apart only after the circular field is established.
+            nodes = [center.copy()]
+            ring_index = 1
+            ring_radius = radial_step
+            outer_center_radius = max(0.0, initial_radius - connected_radius)
+            while ring_radius < outer_center_radius - radial_step * 0.35:
+                circumference = 2.0 * np.pi * ring_radius
+                point_count = max(6, int(round(circumference / source_spacing)))
+                phase = (np.pi / point_count) if (ring_index % 2) else 0.0
+                angles = (np.arange(point_count, dtype=np.float32) *
+                          (2.0 * np.pi / point_count) + phase)
+                ring = np.column_stack([
+                    center[0] + np.cos(angles) * ring_radius,
+                    center[1] + np.sin(angles) * ring_radius,
+                ]).astype(np.float32)
+                nodes.extend(ring)
+                ring_radius += radial_step
+                ring_index += 1
+
+            # Force the last ring to lie exactly one connected-dot radius inside
+            # the desired silhouette. The union of the circles therefore lands at
+            # the same diameter as the source circle without an artificial clip.
+            if outer_center_radius > radial_step:
+                circumference = 2.0 * np.pi * outer_center_radius
+                point_count = max(8, int(round(circumference / source_spacing)))
+                phase = (np.pi / point_count) if (ring_index % 2) else 0.0
+                angles = (np.arange(point_count, dtype=np.float32) *
+                          (2.0 * np.pi / point_count) + phase)
+                outer_ring = np.column_stack([
+                    center[0] + np.cos(angles) * outer_center_radius,
+                    center[1] + np.sin(angles) * outer_center_radius,
+                ]).astype(np.float32)
+                nodes.extend(outer_ring)
+
+            source_nodes = np.asarray(nodes, dtype=np.float32)
+
+            # Polar-order pairing keeps neighboring dots moving with neighboring
+            # dots. When there are slightly more final points than source nodes,
+            # a few points begin at the same source location and naturally split
+            # apart once the morph begins.
             target_offset = target - center
             target_r = np.linalg.norm(target_offset, axis=1)
             target_theta = np.mod(np.arctan2(target_offset[:, 1], target_offset[:, 0]),
@@ -115,17 +143,13 @@ def patch_brand():
             perpendicular = np.column_stack([-direction[:, 1], direction[:, 0]])
             max_distance = max(1.0, float(target_r.max()) if len(target_r) else 1.0)
             radial = target_r / max_distance
-            delay = (0.010 + 0.050 * radial +
-                     0.006 * (0.5 + 0.5 * np.sin(target_theta * 3.0))).astype(np.float32)
+            delay = (0.010 + 0.046 * radial +
+                     0.005 * (0.5 + 0.5 * np.sin(target_theta * 3.0))).astype(np.float32)
             phase = (target[:, 0] * 0.018 + target[:, 1] * 0.023).astype(np.float32)
             dot_radius = (step * (0.34 +
                           0.035 * (0.5 + 0.5 * np.sin(phase)))).astype(np.float32)
-
-            # Radius large enough that the clipped hex field reconstructs a solid
-            # disk with no scalloped edge at the first separation frame.
-            cover_radius = float(source_step * 0.78)
-            return (target, source, source_nodes, perpendicular, delay, dot_radius,
-                    phase, initial_radius, source_dot_radius, cover_radius, float(step))
+            return (target, source, perpendicular, delay, dot_radius, phase,
+                    connected_radius, separated_radius, float(step))
 
 
         def _smootherstep(value):
@@ -135,8 +159,8 @@ def patch_brand():
 
 
         def _round_dot_layer(width, height, positions, radii, color):
-            """Render truly round circles at 3x resolution and downsample cleanly."""
-            scale = 3
+            """Render round circles at 4x resolution and downsample cleanly."""
+            scale = 4
             layer = np.full((height * scale, width * scale, 3), 255, dtype=np.uint8)
             for point, radius in zip(positions, radii):
                 if radius < 0.35:
@@ -148,81 +172,47 @@ def patch_brand():
             return cv2.resize(layer, (width, height), interpolation=cv2.INTER_AREA)
 
 
-        def _exact_circle(width, height, radius, color):
-            """Return an antialiased solid circle at the exact original diameter."""
-            scale = 4
-            layer = np.full((height * scale, width * scale, 3), 255, dtype=np.uint8)
-            cv2.circle(layer,
-                       (int(round(width * scale / 2)), int(round(height * scale / 2))),
-                       int(round(radius * scale)), color, -1, cv2.LINE_AA)
-            return cv2.resize(layer, (width, height), interpolation=cv2.INTER_AREA)
-
-
-        def _clipped_source_field(width, height, source_nodes, radius,
-                                  initial_radius, color):
-            """Draw saturated source dots, clipped to the exact original circle."""
-            scale = 3
-            field = np.full((height * scale, width * scale, 3), 255, dtype=np.uint8)
-            c = tuple(int(channel) for channel in color)
-            r = max(1, int(round(float(radius) * scale)))
-            for point in source_nodes:
-                cv2.circle(field,
-                           (int(round(float(point[0]) * scale)),
-                            int(round(float(point[1]) * scale))),
-                           r, c, -1, cv2.LINE_AA)
-
-            # Clip, rather than cross-fade, so the perimeter never turns into the
-            # pale ghost ring visible in the rejected version.
-            clip = np.zeros((height * scale, width * scale), dtype=np.uint8)
-            cv2.circle(clip,
-                       (int(round(width * scale / 2)), int(round(height * scale / 2))),
-                       int(round(initial_radius * scale)), 255, -1, cv2.LINE_AA)
-            white = np.full_like(field, 255)
-            alpha = clip.astype(np.float32)[:, :, None] / 255.0
-            field = field.astype(np.float32) * alpha + white.astype(np.float32) * (1.0 - alpha)
-            field = np.clip(np.rint(field), 0, 255).astype(np.uint8)
-            return cv2.resize(field, (width, height), interpolation=cv2.INTER_AREA)
-
-
         def render_argus_outro(width, height, progress):
-            """Exact circle -> circular dot breakup -> coherent dotted ARGUS lockup."""
+            """Connected circle -> naturally separating dots -> dotted ARGUS lockup.
+
+            The first state is already made from circles. They overlap so densely
+            that their union is the same clean solid-looking circle as the source
+            film. Gaps appear only because those circles physically shrink and
+            separate; there is never a fake solid fill underneath them.
+            """
             p = float(np.clip(progress, 0.0, 1.0))
-            (target, source, source_nodes, perpendicular, delay, dot_radius,
-             phase, initial_radius, source_dot_radius, cover_radius, step) = \
-                _particle_plan(width, height)
+            (target, source, perpendicular, delay, dot_radius, phase,
+             connected_radius, separated_radius, step) = _particle_plan(width, height)
             color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
 
-            # About three video frames of the exact solid circle after takeover,
-            # then a short clean breakup. There is no alpha blend between a pale
-            # disk and darker dots: white gaps are carved into a saturated disk.
+            # Keep the connected disk intact for roughly three frames, then let
+            # gaps open naturally over ~0.65 s. The actual letter morph begins
+            # gently near the end of that breakup so there is no second hard beat.
             hold_end = 0.026
-            split_end = 0.100
-            morph_start = split_end
-            morph_end = 0.825
+            breakup_end = 0.155
+            morph_start = 0.118
+            morph_end = 0.830
 
-            if p <= hold_end:
-                return _exact_circle(width, height, initial_radius, color)
-
-            if p < split_end:
-                split = float(_smootherstep((p - hold_end) / (split_end - hold_end)))
-                radius = cover_radius * (1.0 - split) + source_dot_radius * split
-                return _clipped_source_field(width, height, source_nodes, radius,
-                                             initial_radius, color)
+            breakup = float(_smootherstep(
+                (p - hold_end) / max(1e-6, breakup_end - hold_end)))
+            breakup = float(np.clip(breakup, 0.0, 1.0))
+            source_radius_now = (connected_radius * (1.0 - breakup) +
+                                 separated_radius * breakup)
 
             morph = np.clip((p - morph_start) / (morph_end - morph_start), 0.0, 1.0)
             local = np.clip((morph - delay) / np.maximum(0.001, 1.0 - delay), 0.0, 1.0)
             eased = _smootherstep(local)
             position = source + (target - source) * eased[:, None]
 
-            # Small coherent transverse wave; zero at both ends and far below one
-            # dot spacing. This reads like the earlier film morphs, not particles
-            # independently flying around.
+            # The subtle coherent wave is zero at the source and destination. It
+            # keeps the point field alive without turning it into independently
+            # flying particles.
             travel = np.sin(np.pi * local)
-            ripple = np.sin(phase + morph * np.pi * 2.35) * step * 0.13 * travel
+            ripple = np.sin(phase + morph * np.pi * 2.35) * step * 0.12 * travel
             position = position + perpendicular * ripple[:, None]
 
-            radii = source_dot_radius * (1.0 - eased) + dot_radius * eased
-            pulse = (1.0 + 0.040 * np.sin(np.pi * local) *
+            radii = source_radius_now * (1.0 - eased) + dot_radius * eased
+            pulse = (1.0 + 0.035 * np.sin(np.pi * local) *
                      np.sin(phase + morph * np.pi * 2.0))
             radii = radii * pulse
             return _round_dot_layer(width, height, position, radii, color)
@@ -234,7 +224,7 @@ def patch_brand():
 def main():
     patch_renderer()
     patch_brand()
-    print("Applied exact-circle ARGUS outro patch")
+    print("Applied naturally-overlapping-circle ARGUS outro patch")
 
 
 if __name__ == "__main__":
