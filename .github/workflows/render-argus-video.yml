@@ -108,8 +108,7 @@ jobs:
           )
           path.write_text(text)
 
-          # Make the final dotted ARGUS / Engineer lockup much larger while
-          # preserving the same particle-only, non-solid visual language.
+          # Keep the large dotted lockup from the previous revision.
           brand = Path("src/argus_brand.py")
           b = brand.read_text()
           b = b.replace(
@@ -122,6 +121,125 @@ jobs:
           )
           b = b.replace('gap = max(18, round(height * 0.027))',
                         'gap = max(24, round(height * 0.032))')
+
+          # Replace the free-flying Bezier cloud with the same kind of structured
+          # pointillist morph used throughout the film: the dot matrix stays
+          # topologically coherent, expands from the center, and changes size in
+          # a restrained wave instead of spraying along random trajectories.
+          start = b.index('@lru_cache(maxsize=8)\ndef _particle_plan')
+          end = b.index('\ndef apply_argus_brand', start)
+          replacement = r'''@lru_cache(maxsize=8)
+def _particle_plan(width, height):
+    """Plan a coherent film-style dot-matrix expansion into the wordmark."""
+    mask = _wordmark(width, height)
+
+    # Larger spacing + larger radii makes each point read as an actual circle,
+    # matching the round dots seen through the rest of the film.
+    step = max(9, round(min(width, height) * 0.0105))
+    ys, xs = np.mgrid[step // 2:height:step, step // 2:width:step]
+    flat_x, flat_y = xs.ravel(), ys.ravel()
+    inside = mask[flat_y, flat_x] > 96
+    target = np.stack([flat_x[inside], flat_y[inside]], axis=1).astype(np.float32)
+
+    center = np.array([width / 2, height / 2], dtype=np.float32)
+    offset = target - center
+    distance = np.linalg.norm(offset, axis=1)
+    safe = np.maximum(distance, 1e-6)
+    direction = offset / safe[:, None]
+    perpendicular = np.column_stack([-direction[:, 1], direction[:, 0]])
+    max_distance = max(1.0, float(distance.max(initial=1.0)))
+    radial = distance / max_distance
+    angle = np.arctan2(offset[:, 1], offset[:, 0])
+
+    # Start as a tiny, already-structured version of the final mark inside the
+    # single source dot. This is much closer to the film's existing grow/morph
+    # language than sending unrelated particles on long individual paths.
+    source = center + offset * 0.045
+
+    # A gentle center-out wave means nearby dots move first and outer dots follow.
+    # The tiny angular stagger keeps it organic without turning it into confetti.
+    delay = (0.015 + 0.125 * radial +
+             0.012 * (0.5 + 0.5 * np.sin(angle * 3.0))).astype(np.float32)
+    arrival = (0.70 + 0.10 * radial).astype(np.float32)
+
+    # Keep radii large enough to remain circular after H.264/YUV420 delivery.
+    phase = (target[:, 0] * 0.018 + target[:, 1] * 0.023).astype(np.float32)
+    dot_radius = (step * (0.34 + 0.035 * (0.5 + 0.5 * np.sin(phase)))).astype(np.float32)
+    initial_radius = float(min(width, height) * 0.082)
+    return (target, source, perpendicular, delay, arrival,
+            dot_radius, phase, initial_radius, float(step))
+
+
+def _smootherstep(value):
+    """Quintic ease with zero velocity and acceleration at both endpoints."""
+    value = np.clip(value, 0.0, 1.0)
+    return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
+
+
+def _round_dot_layer(width, height, positions, radii, color):
+    """Draw truly round points at 2x resolution, then downsample cleanly."""
+    scale = 2
+    layer = np.full((height * scale, width * scale, 3), 255, dtype=np.uint8)
+    for point, radius in zip(positions, radii):
+        if radius < 0.35:
+            continue
+        x = int(round(float(point[0]) * scale))
+        y = int(round(float(point[1]) * scale))
+        r = max(1, int(round(float(radius) * scale)))
+        cv2.circle(layer, (x, y), r, color, -1, cv2.LINE_AA)
+    return cv2.resize(layer, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def render_argus_outro(width, height, progress):
+    """Morph the single dot into a large, permanently dotted ARGUS lockup.
+
+    Motion intentionally follows the film's existing pointillist language:
+    dots remain in a coherent matrix, the shape grows outward from the center,
+    and dot size changes with the morph. There is no random particle spray and
+    no solid-text stage.
+    """
+    p = float(np.clip(progress, 0.0, 1.0))
+    (target, source, perpendicular, delay, arrival,
+     dot_radius, phase, initial_radius, step) = _particle_plan(width, height)
+
+    color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
+    local = (p - delay) / np.maximum(0.001, arrival - delay)
+    clipped = np.clip(local, 0.0, 1.0)
+    eased = _smootherstep(clipped)
+
+    # Preserve the geometry while it expands. A sub-dot-width transverse ripple
+    # gives the same living/morphing feel as earlier transitions without making
+    # individual points look like independent flying particles.
+    position = source + (target - source) * eased[:, None]
+    travel = np.sin(np.pi * clipped)
+    ripple = (np.sin(phase + p * np.pi * 3.0) * step * 0.42 * travel)
+    position = position + perpendicular * ripple[:, None]
+
+    # Dots grow as they emerge, another recurring behavior in the film. Once
+    # settled they become stable circles and remain circles through the last frame.
+    appear = _smootherstep((p - np.maximum(0.0, delay - 0.035)) / 0.095)
+    grow = 0.46 + 0.54 * eased
+    pulse = 1.0 + 0.10 * np.sin(np.pi * clipped) * np.sin(phase + p * np.pi * 2.0)
+    radii = dot_radius * appear * grow * pulse
+    frame = _round_dot_layer(width, height, position, radii, color)
+
+    # The original single blue dot contracts and dissolves directly into that
+    # structured field. It is also supersampled so the handoff stays perfectly round.
+    circle_ease = float(_smootherstep(p / 0.155))
+    circle_alpha = 1.0 - circle_ease
+    if circle_alpha > 0.001:
+        circle_radius = initial_radius * (1.0 - 0.17 * circle_ease)
+        circle = _round_dot_layer(
+            width, height,
+            np.array([[width / 2, height / 2]], dtype=np.float32),
+            np.array([circle_radius], dtype=np.float32), color,
+        )
+        frame = cv2.addWeighted(circle, circle_alpha, frame,
+                                1.0 - circle_alpha, 0.0)
+
+    return frame
+'''
+          b = b[:start] + replacement + b[end:]
           brand.write_text(b)
           PY
           python -m unittest discover -s tests -p "test_argus_brand.py"
@@ -147,6 +265,41 @@ jobs:
           assert stream["level"] == 41
           assert stream["width"] == 1920 and stream["height"] == 1080
           assert stream["r_frame_rate"] == "24/1"
+          PY
+
+      - name: Verify final dots stay circular
+        run: |
+          python - <<'PY'
+          import cv2
+          import numpy as np
+
+          path = "renders/argus-engineer-intelligence-age.mp4"
+          cap = cv2.VideoCapture(path)
+          count = round(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+          cap.set(cv2.CAP_PROP_POS_FRAMES, count - 1)
+          ok, frame = cap.read()
+          cap.release()
+          assert ok
+
+          hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+          h, s, v = cv2.split(hsv)
+          mask = (((h >= 100) & (h <= 125) & (s >= 100) & (v >= 120))
+                  .astype(np.uint8))
+          contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                         cv2.CHAIN_APPROX_SIMPLE)
+          circularities = []
+          for contour in contours:
+              area = cv2.contourArea(contour)
+              perimeter = cv2.arcLength(contour, True)
+              if 12 <= area <= 180 and perimeter > 0:
+                  circularities.append(4.0 * np.pi * area / (perimeter * perimeter))
+          assert len(circularities) > 100, len(circularities)
+          median = float(np.median(circularities))
+          p10 = float(np.percentile(circularities, 10))
+          print({"round_dot_components": len(circularities),
+                 "median_circularity": median, "p10_circularity": p10})
+          assert median >= 0.72, median
+          assert p10 >= 0.60, p10
           PY
 
       - name: Show QA summary
