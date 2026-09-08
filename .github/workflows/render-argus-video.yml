@@ -6,6 +6,7 @@ on:
     paths:
       - "src/argus_brand.py"
       - "scripts/render_argus_direct.py"
+      - "tests/test_argus_brand.py"
       - ".github/workflows/render-argus-video.yml"
   workflow_dispatch:
 
@@ -29,10 +30,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-lato
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt "yt-dlp[default,curl-cffi]"
           ffmpeg -version | head -n 1
+
+      - name: Run ARGUS transform tests
+        run: python -m unittest discover -s tests -p "test_argus_brand.py"
 
       - name: Download best public reference and prepare 1080p working master
         shell: bash

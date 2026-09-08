@@ -122,8 +122,11 @@ def detect_outro_start(frame_count, fps, frame_loader):
 
 
 def _font_candidates(bold):
+    """Prefer a modern Lato lockup; retain platform-native fallbacks."""
     if bold:
         return (
+            Path("/usr/share/fonts/truetype/lato/Lato-Heavy.ttf"),
+            Path("/usr/share/fonts/truetype/lato/Lato-Semibold.ttf"),
             Path("C:/Windows/Fonts/segoeuib.ttf"),
             Path("C:/Windows/Fonts/arialbd.ttf"),
             Path("/System/Library/Fonts/SFNS.ttf"),
@@ -131,6 +134,8 @@ def _font_candidates(bold):
             Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         )
     return (
+        Path("/usr/share/fonts/truetype/lato/Lato-Medium.ttf"),
+        Path("/usr/share/fonts/truetype/lato/Lato-Regular.ttf"),
         Path("C:/Windows/Fonts/segoeui.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),
         Path("/System/Library/Fonts/SFNS.ttf"),
@@ -167,20 +172,19 @@ def _fit_font(draw, text, max_width, initial_size, bold=False):
 
 @lru_cache(maxsize=8)
 def _wordmark(width, height):
-    image = Image.new("RGB", (width, height), "white")
+    """Build only a typography mask; the final logo is always rendered as dots."""
     mask_image = Image.new("L", (width, height), 0)
-    draw = ImageDraw.Draw(image)
     mask_draw = ImageDraw.Draw(mask_image)
 
-    argus_font, argus_box = _fit_font(draw, "Argus", width * 0.48,
-                                      height * 0.20, bold=True)
-    engineer_font, engineer_box = _fit_font(draw, "Engineer", width * 0.26,
-                                            height * 0.074, bold=False)
+    argus_font, argus_box = _fit_font(mask_draw, "Argus", width * 0.46,
+                                      height * 0.19, bold=True)
+    engineer_font, engineer_box = _fit_font(mask_draw, "Engineer", width * 0.25,
+                                            height * 0.068, bold=False)
     argus_width = argus_box[2] - argus_box[0]
     argus_height = argus_box[3] - argus_box[1]
     engineer_width = engineer_box[2] - engineer_box[0]
     engineer_height = engineer_box[3] - engineer_box[1]
-    gap = max(16, round(height * 0.025))
+    gap = max(18, round(height * 0.027))
     total_height = argus_height + gap + engineer_height
     top = round(height * 0.51 - total_height / 2)
 
@@ -189,49 +193,65 @@ def _wordmark(width, height):
     engineer_xy = ((width - engineer_width) / 2 - engineer_box[0],
                    top + argus_height + gap - engineer_box[1])
 
-    draw.text(argus_xy, "Argus", font=argus_font, fill=ARGUS_BLUE_RGB)
-    draw.text(engineer_xy, "Engineer", font=engineer_font, fill=ARGUS_BLUE_RGB)
     mask_draw.text(argus_xy, "Argus", font=argus_font, fill=255)
     mask_draw.text(engineer_xy, "Engineer", font=engineer_font, fill=255)
-
-    final_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-    mask = np.asarray(mask_image)
-    return final_bgr, mask
+    return np.asarray(mask_image)
 
 
 @lru_cache(maxsize=8)
 def _particle_plan(width, height):
-    final, mask = _wordmark(width, height)
-    step = max(10, round(min(width, height) * 0.013))
+    """Plan a deterministic dot-cloud burst from the center into the wordmark."""
+    mask = _wordmark(width, height)
+    step = max(6, round(min(width, height) * 0.0065))
     ys, xs = np.mgrid[step // 2:height:step, step // 2:width:step]
     flat_x, flat_y = xs.ravel(), ys.ravel()
-    inside = mask[flat_y, flat_x] > 80
+    inside = mask[flat_y, flat_x] > 96
     target = np.stack([flat_x[inside], flat_y[inside]], axis=1).astype(np.float32)
 
     rng = np.random.default_rng(0xA69E)
-    if len(target) > 2600:
-        target = target[rng.choice(len(target), 2600, replace=False)]
+    if len(target) > 3600:
+        target = target[rng.choice(len(target), 3600, replace=False)]
     count = len(target)
-    center = np.array([width / 2, height / 2], dtype=np.float32)
-    angle = rng.uniform(0, 2 * np.pi, count)
-    radius = rng.uniform(min(width, height) * 0.18,
-                         min(width, height) * 0.78, count)
-    source = np.column_stack([
-        center[0] + np.cos(angle) * radius,
-        center[1] + np.sin(angle) * radius,
-    ]).astype(np.float32)
-    source[:, 0] = np.clip(source[:, 0], 20, width - 20)
-    source[:, 1] = np.clip(source[:, 1], 20, height - 20)
 
-    # Keep the asynchronous feel, but reduce the delay spread and arc size so
-    # adjacent 24 fps frames flow more continuously into the final lockup.
-    delay = rng.uniform(0.0, 0.22, count).astype(np.float32)
-    curve = rng.uniform(-min(width, height) * 0.10,
-                        min(width, height) * 0.10, count).astype(np.float32)
-    start_radius = rng.uniform(1.5, 4.5, count).astype(np.float32)
-    end_radius = rng.uniform(max(2, step * 0.22),
-                             max(3, step * 0.34), count).astype(np.float32)
-    return final, mask, target, source, delay, curve, start_radius, end_radius
+    center = np.array([width / 2, height / 2], dtype=np.float32)
+    initial_radius = min(width, height) * 0.082
+
+    # All particles begin *inside* the last blue dot. As the dot dissolves,
+    # these points become visible and peel away from the same physical location.
+    start_angle = rng.uniform(0.0, 2.0 * np.pi, count)
+    start_radius = initial_radius * np.sqrt(rng.uniform(0.0, 1.0, count))
+    source = np.column_stack([
+        center[0] + np.cos(start_angle) * start_radius,
+        center[1] + np.sin(start_angle) * start_radius,
+    ]).astype(np.float32)
+
+    # First control point throws particles outward in a broad, asymmetric bloom.
+    burst_angle = start_angle + rng.normal(0.0, 0.34, count)
+    burst_radius = rng.uniform(min(width, height) * 0.16,
+                               min(width, height) * 0.34, count)
+    control1 = np.column_stack([
+        center[0] + np.cos(burst_angle) * burst_radius,
+        center[1] + np.sin(burst_angle) * burst_radius,
+    ]).astype(np.float32)
+
+    # Second control point bends those trajectories back toward their letter
+    # destinations, creating a flowing magnetic-field / data-stream motion.
+    inward = target - center
+    length = np.linalg.norm(inward, axis=1) + 1e-6
+    perpendicular = np.column_stack([-inward[:, 1] / length,
+                                      inward[:, 0] / length])
+    lateral = rng.uniform(-min(width, height) * 0.12,
+                           min(width, height) * 0.12, count)
+    control2 = (target - inward * rng.uniform(0.04, 0.13, count)[:, None] +
+                perpendicular * lateral[:, None]).astype(np.float32)
+
+    delay = rng.uniform(0.0, 0.11, count).astype(np.float32)
+    arrival = rng.uniform(0.82, 0.90, count).astype(np.float32)
+    dot_radius = rng.uniform(max(1.35, step * 0.18),
+                             max(2.1, step * 0.29), count).astype(np.float32)
+    phase = rng.uniform(0.0, 2.0 * np.pi, count).astype(np.float32)
+    return (mask, target, source, control1, control2, delay, arrival,
+            dot_radius, phase, float(initial_radius))
 
 
 def _smootherstep(value):
@@ -240,55 +260,98 @@ def _smootherstep(value):
     return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
 
 
-def render_argus_outro(width, height, progress):
-    """Render fluid asynchronous dots converging into the Argus Engineer lockup."""
+def _bezier(source, control1, control2, target, t):
+    """Vectorized cubic Bezier positions for one parameter per particle."""
+    t = np.asarray(t, dtype=np.float32)[:, None]
+    one = 1.0 - t
+    return (one ** 3 * source +
+            3.0 * one ** 2 * t * control1 +
+            3.0 * one * t ** 2 * control2 +
+            t ** 3 * target)
+
+
+def _brand_blue_source(frame):
+    """Normalize the source outro's saturated blue to ARGUS blue for handoff."""
+    output = frame.copy()
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = cv2.split(hsv)
+    mask = ((hue >= 85) & (hue <= 125) &
+            (saturation >= 55) & (value >= 70))
+    if np.any(mask):
+        output[mask] = np.clip(np.rint(ARGUS_BLUE_BGR), 0, 255).astype(np.uint8)
+    return output
+
+
+def render_argus_outro(width, height, progress, source_frame=None):
+    """Dissolve the last blue dot into a fluid cloud that remains a dotted logo.
+
+    There is deliberately no solid-wordmark stage. The final Argus / Engineer
+    lockup is itself a high-density pointillist object, so the visual language
+    stays technological all the way through the last frame.
+    """
     p = float(np.clip(progress, 0.0, 1.0))
-    final, mask, target, source, delay, curve, start_radius, end_radius = \
-        _particle_plan(width, height)
-    if p >= 0.95:
-        return final.copy()
+    (mask, target, source, control1, control2, delay, arrival,
+     dot_radius, phase, initial_radius) = _particle_plan(width, height)
 
     white = np.full((height, width, 3), 255, dtype=np.uint8)
     frame = white.copy()
     color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
 
-    # Each particle gets a slightly different start, but all settle gently by
-    # roughly the same phase instead of stopping early and then snapping away.
-    arrival = 0.80 + delay * 0.10
+    # Each point starts inside the original dot, blooms outward, then settles
+    # independently into the letter matrix. Arrival is finished early enough to
+    # leave a clean dotted lockup on screen instead of morphing into solid text.
     local = (p - delay) / np.maximum(0.001, arrival - delay)
     eased = _smootherstep(local)
-    visible = p > delay
+    position = _bezier(source, control1, control2, target, eased)
 
-    delta = target - source
-    length = np.linalg.norm(delta, axis=1) + 1e-6
-    perpendicular = np.column_stack([-delta[:, 1] / length,
-                                      delta[:, 0] / length])
-    arc = np.sin(np.pi * eased) * curve
-    position = source + delta * eased[:, None] + perpendicular * arc[:, None]
-    radius = start_radius + (end_radius - start_radius) * eased
+    # A very short ghost-dot trail makes 24 fps motion read substantially more
+    # fluidly without introducing line graphics that break the pointillist style.
+    moving = 1.0 - float(_smootherstep((p - 0.79) / 0.10))
+    if moving > 0.001:
+        previous = np.clip(eased - 0.030, 0.0, 1.0)
+        trail_position = _bezier(source, control1, control2, target, previous)
+        trail = frame.copy()
+        for particle in range(len(target)):
+            radius = max(1, int(round(dot_radius[particle] * 0.72)))
+            cv2.circle(trail,
+                       (int(round(trail_position[particle, 0])),
+                        int(round(trail_position[particle, 1]))),
+                       radius, color, -1, cv2.LINE_AA)
+        frame = cv2.addWeighted(trail, 0.16 * moving, frame,
+                                1.0 - 0.16 * moving, 0.0)
 
-    for particle in np.flatnonzero(visible):
+    # Subtle radius breathing while particles are in flight. It disappears as
+    # the wordmark settles, so the final dotted type is crisp and stable.
+    flight = 1.0 - _smootherstep((p - 0.72) / 0.16)
+    radii = dot_radius * (1.0 + 0.08 * np.sin(phase + p * np.pi * 5.0) * flight)
+    for particle in range(len(target)):
         cv2.circle(frame,
                    (int(round(position[particle, 0])),
                     int(round(position[particle, 1]))),
-                   max(1, int(round(radius[particle]))),
+                   max(1, int(round(radii[particle]))),
                    color, -1, cv2.LINE_AA)
 
-    # Fade the free particles away only as the complete wordmark resolves.
-    # This removes the previous hard disappearance near the end of the morph.
-    particle_fade = float(_smootherstep((p - 0.76) / 0.19))
-    if particle_fade > 0.0:
-        frame = np.clip(frame.astype(np.float32) * (1.0 - particle_fade) +
-                        white.astype(np.float32) * particle_fade,
+    # Keep the single dot continuous at the handoff, then let it visibly break
+    # apart as the already-present internal particles escape from its boundary.
+    circle_alpha = 1.0 - float(_smootherstep(p / 0.18))
+    if circle_alpha > 0.001:
+        dot_layer = frame.copy()
+        shrink = 1.0 - 0.10 * float(_smootherstep(p / 0.18))
+        cv2.circle(dot_layer, (round(width / 2), round(height / 2)),
+                   max(1, round(initial_radius * shrink)), color, -1, cv2.LINE_AA)
+        frame = cv2.addWeighted(dot_layer, circle_alpha, frame,
+                                1.0 - circle_alpha, 0.0)
+
+    # For only the first few frames, crossfade from the actual source frame so
+    # the previous blue-dot shot and our generated breakup are temporally joined
+    # rather than separated by a hard edit.
+    if source_frame is not None and p < 0.06:
+        handoff = 1.0 - float(_smootherstep(p / 0.06))
+        branded_source = _brand_blue_source(source_frame)
+        frame = np.clip(branded_source.astype(np.float32) * handoff +
+                        frame.astype(np.float32) * (1.0 - handoff),
                         0, 255).astype(np.uint8)
 
-    # Every letter resolves together (not character-by-character / typing).
-    merge = float(_smootherstep((p - 0.72) / 0.23))
-    if merge > 0.0:
-        alpha = (mask.astype(np.float32) / 255.0 * merge)[:, :, None]
-        frame = np.clip(frame.astype(np.float32) * (1.0 - alpha) +
-                        final.astype(np.float32) * alpha,
-                        0, 255).astype(np.uint8)
     return frame
 
 
@@ -296,5 +359,6 @@ def apply_argus_brand(frame, index, frame_count, outro_start):
     if index >= outro_start:
         denominator = max(1, frame_count - 1 - outro_start)
         return render_argus_outro(frame.shape[1], frame.shape[0],
-                                  (index - outro_start) / denominator)
+                                  (index - outro_start) / denominator,
+                                  source_frame=frame)
     return recolor_black_dots(frame)
