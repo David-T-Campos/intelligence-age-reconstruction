@@ -89,22 +89,42 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+
+          # Delivery codec + timing / QA tuning.
           path = Path("scripts/render_argus_direct.py")
           text = path.read_text()
-          # The prior lossless x264 output selected High 4:4:4 Predictive, which
-          # iPad/iPhone Safari may refuse to decode. Use an extremely high-quality
-          # but broadly supported H.264 High@4.1 delivery stream instead.
           text = text.replace('"-crf", "0"', '"-crf", "14"')
           text = text.replace(
               '"-profile:v", "high",',
               '"-profile:v", "high", "-level:v", "4.1", "-tag:v", "avc1",'
           )
           text = text.replace(
+              'return result if result is not None else max(0, count - round(fps * 3.5))',
+              'detected = result if result is not None else max(0, count - round(fps * 3.5))\n    return max(0, detected - round(fps * 0.25))'
+          )
+          text = text.replace(
               'allowed_low_ssim = max(6, math.ceil(count * 0.01))',
               'allowed_low_ssim = max(round(fps * 1.5), math.ceil(count * 0.03))'
           )
           path.write_text(text)
+
+          # Make the final dotted ARGUS / Engineer lockup much larger while
+          # preserving the same particle-only, non-solid visual language.
+          brand = Path("src/argus_brand.py")
+          b = brand.read_text()
+          b = b.replace(
+              'argus_font, argus_box = _fit_font(mask_draw, "Argus", width * 0.46,\n                                      height * 0.19, bold=True)',
+              'argus_font, argus_box = _fit_font(mask_draw, "Argus", width * 0.72,\n                                      height * 0.32, bold=True)'
+          )
+          b = b.replace(
+              'engineer_font, engineer_box = _fit_font(mask_draw, "Engineer", width * 0.30,\n                                            height * 0.080, bold=False)',
+              'engineer_font, engineer_box = _fit_font(mask_draw, "Engineer", width * 0.50,\n                                            height * 0.145, bold=False)'
+          )
+          b = b.replace('gap = max(18, round(height * 0.027))',
+                        'gap = max(24, round(height * 0.032))')
+          brand.write_text(b)
           PY
+          python -m unittest discover -s tests -p "test_argus_brand.py"
           python scripts/render_argus_direct.py
 
       - name: Verify Apple-compatible delivery codec
