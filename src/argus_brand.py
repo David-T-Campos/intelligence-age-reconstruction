@@ -178,8 +178,8 @@ def _wordmark(width, height):
 
     argus_font, argus_box = _fit_font(mask_draw, "Argus", width * 0.46,
                                       height * 0.19, bold=True)
-    engineer_font, engineer_box = _fit_font(mask_draw, "Engineer", width * 0.25,
-                                            height * 0.068, bold=False)
+    engineer_font, engineer_box = _fit_font(mask_draw, "Engineer", width * 0.30,
+                                            height * 0.080, bold=False)
     argus_width = argus_box[2] - argus_box[0]
     argus_height = argus_box[3] - argus_box[1]
     engineer_width = engineer_box[2] - engineer_box[0]
@@ -270,19 +270,7 @@ def _bezier(source, control1, control2, target, t):
             t ** 3 * target)
 
 
-def _brand_blue_source(frame):
-    """Normalize the source outro's saturated blue to ARGUS blue for handoff."""
-    output = frame.copy()
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    hue, saturation, value = cv2.split(hsv)
-    mask = ((hue >= 85) & (hue <= 125) &
-            (saturation >= 55) & (value >= 70))
-    if np.any(mask):
-        output[mask] = np.clip(np.rint(ARGUS_BLUE_BGR), 0, 255).astype(np.uint8)
-    return output
-
-
-def render_argus_outro(width, height, progress, source_frame=None):
+def render_argus_outro(width, height, progress):
     """Dissolve the last blue dot into a fluid cloud that remains a dotted logo.
 
     There is deliberately no solid-wordmark stage. The final Argus / Engineer
@@ -331,8 +319,9 @@ def render_argus_outro(width, height, progress, source_frame=None):
                    max(1, int(round(radii[particle]))),
                    color, -1, cv2.LINE_AA)
 
-    # Keep the single dot continuous at the handoff, then let it visibly break
-    # apart as the already-present internal particles escape from its boundary.
+    # Begin on the exact visual language of the preceding single blue dot. It
+    # then dissolves directly into the particles already living inside it. There
+    # is no source-logo crossfade, so no white notch or ghost ring can appear.
     circle_alpha = 1.0 - float(_smootherstep(p / 0.18))
     if circle_alpha > 0.001:
         dot_layer = frame.copy()
@@ -342,16 +331,6 @@ def render_argus_outro(width, height, progress, source_frame=None):
         frame = cv2.addWeighted(dot_layer, circle_alpha, frame,
                                 1.0 - circle_alpha, 0.0)
 
-    # For only the first few frames, crossfade from the actual source frame so
-    # the previous blue-dot shot and our generated breakup are temporally joined
-    # rather than separated by a hard edit.
-    if source_frame is not None and p < 0.06:
-        handoff = 1.0 - float(_smootherstep(p / 0.06))
-        branded_source = _brand_blue_source(source_frame)
-        frame = np.clip(branded_source.astype(np.float32) * handoff +
-                        frame.astype(np.float32) * (1.0 - handoff),
-                        0, 255).astype(np.uint8)
-
     return frame
 
 
@@ -359,6 +338,5 @@ def apply_argus_brand(frame, index, frame_count, outro_start):
     if index >= outro_start:
         denominator = max(1, frame_count - 1 - outro_start)
         return render_argus_outro(frame.shape[1], frame.shape[0],
-                                  (index - outro_start) / denominator,
-                                  source_frame=frame)
+                                  (index - outro_start) / denominator)
     return recolor_black_dots(frame)
