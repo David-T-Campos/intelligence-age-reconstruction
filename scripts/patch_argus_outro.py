@@ -65,21 +65,17 @@ def patch_brand():
             inside = mask[flat_y, flat_x] > 96
             target = np.stack([flat_x[inside], flat_y[inside]], axis=1).astype(np.float32)
 
-            # The source film's last intact blue circle is centered on the half-pixel
-            # center of the 1920x1080 raster (959.5, 539.5), not (960, 540).
-            center = np.array([(width - 1) / 2.0, (height - 1) / 2.0],
-                              dtype=np.float32)
+            center = np.array([width / 2.0, height / 2.0], dtype=np.float32)
             initial_radius = float(min(width, height) * 0.0811)
 
-            # Concentric rings give a genuinely circular outer envelope. The circles
-            # intentionally OVERLAP, just like the connected-circle shapes earlier
-            # in the film. There is no solid mask, alpha fill, clipping disk, or
-            # pale backing layer: the disk is blue because neighboring circles
-            # physically overlap and become one connected blue shape.
-            source_spacing = float(min(width, height) * 0.00519)  # ~5.6 px at 1080p
+            # The source is made ONLY from overlapping circles. Their union looks
+            # like the intact film circle at first; as their radii shrink, gaps
+            # appear naturally between them. No mask or flat backing disk exists.
+            source_spacing = float(min(width, height) * 0.00519)
             radial_step = source_spacing * 0.82
             connected_radius = source_spacing * 0.88
             separated_radius = source_spacing * 0.43
+            golden_angle = np.pi * (3.0 - np.sqrt(5.0))
 
             nodes = [center.copy()]
             ring_index = 1
@@ -88,9 +84,10 @@ def patch_brand():
             while ring_radius < outer_center_radius - radial_step * 0.35:
                 circumference = 2.0 * np.pi * ring_radius
                 point_count = max(6, int(round(circumference / source_spacing)))
-                phase = (np.pi / point_count) if (ring_index % 2) else 0.0
+                angular_step = 2.0 * np.pi / point_count
+                phase = float(np.mod(ring_index * golden_angle, angular_step))
                 angles = (np.arange(point_count, dtype=np.float32) *
-                          (2.0 * np.pi / point_count) + phase)
+                          angular_step + phase)
                 ring = np.column_stack([
                     center[0] + np.cos(angles) * ring_radius,
                     center[1] + np.sin(angles) * ring_radius,
@@ -99,15 +96,15 @@ def patch_brand():
                 ring_radius += radial_step
                 ring_index += 1
 
-            # Force the last ring to lie exactly one connected-dot radius inside
-            # the desired silhouette. The union of the circles therefore lands at
-            # the same diameter as the source circle without an artificial clip.
+            # The outer ring sits exactly one connected-circle radius inside the
+            # requested silhouette, so overlapping circles define the boundary.
             if outer_center_radius > radial_step:
                 circumference = 2.0 * np.pi * outer_center_radius
                 point_count = max(8, int(round(circumference / source_spacing)))
-                phase = (np.pi / point_count) if (ring_index % 2) else 0.0
+                angular_step = 2.0 * np.pi / point_count
+                phase = float(np.mod(ring_index * golden_angle, angular_step))
                 angles = (np.arange(point_count, dtype=np.float32) *
-                          (2.0 * np.pi / point_count) + phase)
+                          angular_step + phase)
                 outer_ring = np.column_stack([
                     center[0] + np.cos(angles) * outer_center_radius,
                     center[1] + np.sin(angles) * outer_center_radius,
@@ -117,9 +114,8 @@ def patch_brand():
             source_nodes = np.asarray(nodes, dtype=np.float32)
 
             # Polar-order pairing keeps neighboring dots moving with neighboring
-            # dots. When there are slightly more final points than source nodes,
-            # a few points begin at the same source location and naturally split
-            # apart once the morph begins.
+            # dots. A few final points can share a source location and then split
+            # naturally as the transformation begins.
             target_offset = target - center
             target_r = np.linalg.norm(target_offset, axis=1)
             target_theta = np.mod(np.arctan2(target_offset[:, 1], target_offset[:, 0]),
@@ -173,21 +169,15 @@ def patch_brand():
 
 
         def render_argus_outro(width, height, progress):
-            """Connected circle -> naturally separating dots -> dotted ARGUS lockup.
-
-            The first state is already made from circles. They overlap so densely
-            that their union is the same clean solid-looking circle as the source
-            film. Gaps appear only because those circles physically shrink and
-            separate; there is never a fake solid fill underneath them.
-            """
+            """Connected circle -> naturally separating dots -> dotted ARGUS lockup."""
             p = float(np.clip(progress, 0.0, 1.0))
             (target, source, perpendicular, delay, dot_radius, phase,
              connected_radius, separated_radius, step) = _particle_plan(width, height)
             color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
 
-            # Keep the connected disk intact for roughly three frames, then let
-            # gaps open naturally over ~0.65 s. The actual letter morph begins
-            # gently near the end of that breakup so there is no second hard beat.
+            # Roughly three frames of a fully connected circle, followed by a
+            # gradual shrink of the SAME circles. They visibly unstick from one
+            # another instead of fading over a fake solid shape.
             hold_end = 0.026
             breakup_end = 0.155
             morph_start = 0.118
@@ -204,9 +194,6 @@ def patch_brand():
             eased = _smootherstep(local)
             position = source + (target - source) * eased[:, None]
 
-            # The subtle coherent wave is zero at the source and destination. It
-            # keeps the point field alive without turning it into independently
-            # flying particles.
             travel = np.sin(np.pi * local)
             ripple = np.sin(phase + morph * np.pi * 2.35) * step * 0.12 * travel
             position = position + perpendicular * ripple[:, None]
