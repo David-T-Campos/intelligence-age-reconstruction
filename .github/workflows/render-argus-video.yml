@@ -91,7 +91,14 @@ jobs:
           from pathlib import Path
           path = Path("scripts/render_argus_direct.py")
           text = path.read_text()
-          text = text.replace(', "-profile:v", "high"', '')
+          # The prior lossless x264 output selected High 4:4:4 Predictive, which
+          # iPad/iPhone Safari may refuse to decode. Use an extremely high-quality
+          # but broadly supported H.264 High@4.1 delivery stream instead.
+          text = text.replace('"-crf", "0"', '"-crf", "14"')
+          text = text.replace(
+              '"-profile:v", "high",',
+              '"-profile:v", "high", "-level:v", "4.1", "-tag:v", "avc1",'
+          )
           text = text.replace(
               'allowed_low_ssim = max(6, math.ceil(count * 0.01))',
               'allowed_low_ssim = max(round(fps * 1.5), math.ceil(count * 0.03))'
@@ -99,6 +106,28 @@ jobs:
           path.write_text(text)
           PY
           python scripts/render_argus_direct.py
+
+      - name: Verify Apple-compatible delivery codec
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+
+          path = "renders/argus-engineer-intelligence-age.mp4"
+          raw = subprocess.check_output([
+              "ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=codec_name,profile,pix_fmt,level,width,height,r_frame_rate",
+              "-of", "json", path,
+          ])
+          stream = json.loads(raw)["streams"][0]
+          print(json.dumps(stream, indent=2))
+          assert stream["codec_name"] == "h264"
+          assert stream["profile"] == "High"
+          assert stream["pix_fmt"] == "yuv420p"
+          assert stream["level"] == 41
+          assert stream["width"] == 1920 and stream["height"] == 1080
+          assert stream["r_frame_rate"] == "24/1"
+          PY
 
       - name: Show QA summary
         if: always()
