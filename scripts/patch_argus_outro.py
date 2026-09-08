@@ -53,11 +53,11 @@ def patch_brand():
     replacement = textwrap.dedent(r'''
         @lru_cache(maxsize=8)
         def _particle_plan(width, height):
-            """Plan a coherent film-style dot-matrix expansion into the wordmark."""
+            """Plan a true circular source field that coherently becomes the wordmark."""
             mask = _wordmark(width, height)
 
-            # Use the same visual grammar as the film: clearly separated round
-            # points on a structured field, not tiny pixel-like particles.
+            # Final lettering uses clearly separated round points, matching the
+            # pointillist grammar of the rest of the film rather than pixel specks.
             step = max(9, round(min(width, height) * 0.0105))
             ys, xs = np.mgrid[step // 2:height:step, step // 2:width:step]
             flat_x, flat_y = xs.ravel(), ys.ravel()
@@ -65,32 +65,55 @@ def patch_brand():
             target = np.stack([flat_x[inside], flat_y[inside]], axis=1).astype(np.float32)
 
             center = np.array([width / 2, height / 2], dtype=np.float32)
-            offset = target - center
-            distance = np.linalg.norm(offset, axis=1)
-            safe = np.maximum(distance, 1e-6)
-            direction = offset / safe[:, None]
+            count = len(target)
+            initial_radius = float(min(width, height) * 0.082)
+
+            # IMPORTANT: the previous revision started as a miniature copy of the
+            # wordmark, which became the little "shirt" blob as soon as the solid
+            # circle faded. Start from an actually circular, uniformly filled dot
+            # field instead. A Vogel / sunflower disk gives an even circular fill
+            # with no hidden word silhouette at the handoff.
+            idx = np.arange(count, dtype=np.float32)
+            golden_angle = np.float32(np.pi * (3.0 - np.sqrt(5.0)))
+            source_angle = idx * golden_angle
+            source_radius = initial_radius * 0.87 * np.sqrt((idx + 0.5) / max(1, count))
+            source_raw = np.column_stack([
+                center[0] + np.cos(source_angle) * source_radius,
+                center[1] + np.sin(source_angle) * source_radius,
+            ]).astype(np.float32)
+
+            # Pair circular-source points with final targets by polar order. This
+            # keeps neighbors moving with neighbors and avoids the random particle
+            # flight that looked unlike the earlier morphs in the film.
+            source_offset = source_raw - center
+            target_offset = target - center
+            source_r = np.linalg.norm(source_offset, axis=1)
+            target_r = np.linalg.norm(target_offset, axis=1)
+            source_theta = np.mod(np.arctan2(source_offset[:, 1], source_offset[:, 0]),
+                                  2.0 * np.pi)
+            target_theta = np.mod(np.arctan2(target_offset[:, 1], target_offset[:, 0]),
+                                  2.0 * np.pi)
+            source_order = np.lexsort((source_r, source_theta))
+            target_order = np.lexsort((target_r, target_theta))
+            source = np.empty_like(source_raw)
+            source[target_order] = source_raw[source_order]
+
+            safe = np.maximum(target_r, 1e-6)
+            direction = target_offset / safe[:, None]
             perpendicular = np.column_stack([-direction[:, 1], direction[:, 0]])
-            max_distance = max(1.0, float(distance.max()) if len(distance) else 1.0)
-            radial = distance / max_distance
-            angle = np.arctan2(offset[:, 1], offset[:, 0])
+            max_distance = max(1.0, float(target_r.max()) if count else 1.0)
+            radial = target_r / max_distance
 
-            # Start as a tiny version of the final geometry inside the source dot.
-            # That preserves topology and makes the transition behave like the
-            # grow/morph sequences earlier in the film rather than a particle spray.
-            source = center + offset * 0.045
-
-            # Center-out reveal with a restrained wave. Neighboring dots remain
-            # neighbors instead of taking unrelated paths across the frame.
-            delay = (0.015 + 0.125 * radial +
-                     0.012 * (0.5 + 0.5 * np.sin(angle * 3.0))).astype(np.float32)
-            arrival = (0.70 + 0.10 * radial).astype(np.float32)
-
+            # A restrained center-out phase offset recreates the film's broad
+            # shape morphs without making each dot feel independently animated.
+            delay = (0.015 + 0.075 * radial +
+                     0.010 * (0.5 + 0.5 * np.sin(target_theta * 3.0))).astype(np.float32)
             phase = (target[:, 0] * 0.018 + target[:, 1] * 0.023).astype(np.float32)
             dot_radius = (step * (0.34 +
                           0.035 * (0.5 + 0.5 * np.sin(phase)))).astype(np.float32)
-            initial_radius = float(min(width, height) * 0.082)
-            return (target, source, perpendicular, delay, arrival,
-                    dot_radius, phase, initial_radius, float(step))
+            source_dot_radius = float(max(1.8, step * 0.19))
+            return (target, source, perpendicular, delay, dot_radius, phase,
+                    initial_radius, source_dot_radius, float(step))
 
 
         def _smootherstep(value):
@@ -114,46 +137,59 @@ def patch_brand():
 
 
         def render_argus_outro(width, height, progress):
-            """Morph the single dot into a large, permanently dotted ARGUS lockup.
+            """Circle -> circular dot field -> large permanently dotted ARGUS lockup.
 
-            The motion deliberately follows the established film language: the
-            point field stays coherent, expands outward, and changes dot size.
-            There is no random Bezier flight and no solid-text phase.
+            The source remains a real circle during the handoff. It first resolves
+            into round dots *inside that same circle*, and only then does the whole
+            coherent field stretch into the final lettering. There is no miniature
+            wordmark, random particle spray, or solid-text phase.
             """
             p = float(np.clip(progress, 0.0, 1.0))
-            (target, source, perpendicular, delay, arrival,
-             dot_radius, phase, initial_radius, step) = _particle_plan(width, height)
+            (target, source, perpendicular, delay, dot_radius, phase,
+             initial_radius, source_dot_radius, step) = _particle_plan(width, height)
 
             color = tuple(int(channel) for channel in ARGUS_BLUE_BGR)
-            local = (p - delay) / np.maximum(0.001, arrival - delay)
-            clipped = np.clip(local, 0.0, 1.0)
-            eased = _smootherstep(clipped)
 
-            # Geometry-preserving expansion plus a very small transverse ripple.
-            # The ripple is intentionally below one dot spacing and vanishes at
-            # both ends, matching the living pointillist movement elsewhere.
+            # Phase 1 (0.00-0.07): hold a perfect solid circle.
+            # Phase 2 (0.07-0.20): resolve that circle into a circular field of dots.
+            # Phase 3 (0.18-0.82): morph the coherent field into ARGUS / Engineer.
+            hold_end = 0.070
+            dots_end = 0.200
+            morph_start = 0.180
+            morph_end = 0.820
+
+            morph = np.clip((p - morph_start) / (morph_end - morph_start), 0.0, 1.0)
+            local = np.clip((morph - delay) / np.maximum(0.001, 1.0 - delay), 0.0, 1.0)
+            eased = _smootherstep(local)
+
             position = source + (target - source) * eased[:, None]
-            travel = np.sin(np.pi * clipped)
-            ripple = np.sin(phase + p * np.pi * 3.0) * step * 0.42 * travel
+
+            # A tiny transverse wave is strongest mid-morph and exactly zero at
+            # both ends. This gives the living motion seen earlier in the film
+            # while the overall object still moves as one coherent shape.
+            travel = np.sin(np.pi * local)
+            ripple = np.sin(phase + morph * np.pi * 2.5) * step * 0.16 * travel
             position = position + perpendicular * ripple[:, None]
 
-            # Dots grow while the object grows, then settle into stable circles.
-            appear = _smootherstep((p - np.maximum(0.0, delay - 0.035)) / 0.095)
-            grow = 0.46 + 0.54 * eased
-            pulse = (1.0 + 0.10 * np.sin(np.pi * clipped) *
-                     np.sin(phase + p * np.pi * 2.0))
-            radii = dot_radius * appear * grow * pulse
+            reveal = _smootherstep((p - hold_end) / (dots_end - hold_end))
+            radii = (source_dot_radius * (1.0 - eased) + dot_radius * eased)
+            pulse = (1.0 + 0.055 * np.sin(np.pi * local) *
+                     np.sin(phase + morph * np.pi * 2.0))
+            radii = radii * reveal * pulse
             frame = _round_dot_layer(width, height, position, radii, color)
 
-            # The original source dot contracts directly into the structured field.
-            circle_ease = float(_smootherstep(p / 0.155))
-            circle_alpha = 1.0 - circle_ease
+            # Keep the solid disk fully intact at first, then dissolve it only
+            # after the circular dot field underneath has become visible. This
+            # guarantees a literal circle-to-dots transition with no blob frame.
+            circle_alpha = 1.0 - float(_smootherstep(
+                (p - hold_end) / (dots_end - hold_end)))
+            if p <= hold_end:
+                circle_alpha = 1.0
             if circle_alpha > 0.001:
-                circle_radius = initial_radius * (1.0 - 0.17 * circle_ease)
                 circle = _round_dot_layer(
                     width, height,
                     np.array([[width / 2, height / 2]], dtype=np.float32),
-                    np.array([circle_radius], dtype=np.float32), color,
+                    np.array([initial_radius], dtype=np.float32), color,
                 )
                 frame = cv2.addWeighted(circle, circle_alpha, frame,
                                         1.0 - circle_alpha, 0.0)
@@ -167,7 +203,7 @@ def patch_brand():
 def main():
     patch_renderer()
     patch_brand()
-    print("Applied circular film-style ARGUS outro patch")
+    print("Applied true-circle film-style ARGUS outro patch")
 
 
 if __name__ == "__main__":
