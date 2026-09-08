@@ -9,15 +9,24 @@ from PIL import Image, ImageDraw, ImageFont
 # ARGUS primary product blue: #2C55E6 (RGB). OpenCV stores BGR.
 ARGUS_BLUE_RGB = (0x2C, 0x55, 0xE6)
 ARGUS_BLUE_BGR = np.array((0xE6, 0x55, 0x2C), dtype=np.float32)
+_WHITE_BGR = np.array((255.0, 255.0, 255.0), dtype=np.float32)
+
+
+def _border_luma(frame):
+    height, width = frame.shape[:2]
+    band = max(1, min(height, width) // 32)
+    border = np.concatenate([
+        frame[:band].reshape(-1, 3),
+        frame[-band:].reshape(-1, 3),
+        frame[:, :band].reshape(-1, 3),
+        frame[:, -band:].reshape(-1, 3),
+    ], axis=0)
+    b, g, r = [border[:, i].astype(np.float32) for i in range(3)]
+    return float(np.median(0.114 * b + 0.587 * g + 0.299 * r))
 
 
 def _dot_components(core_mask):
-    """Keep dot/pointillist components while rejecting page/field components.
-
-    White and black backgrounds are usually enormous connected components and
-    often touch the frame edge. Pointillist marks are bounded components, even
-    when many neighboring dots merge into a larger illustrated region.
-    """
+    """Keep bounded pointillist components while rejecting page/field components."""
     binary = core_mask.astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if count <= 1:
@@ -35,21 +44,19 @@ def _dot_components(core_mask):
 
     areas = stats[:, cv2.CC_STAT_AREA]
     eligible = (areas > 0) & (areas <= max_area)
-    # A tiny dot is still a dot if it happens to graze the edge; only reject
-    # border-connected components once they are large enough to be a field.
     eligible &= (~touches_border) | (areas <= tiny_border_area)
     eligible[0] = False
     return eligible[labels]
 
 
 def recolor_black_dots(frame):
-    """Recolor both black and white pointillist marks to ARGUS blue.
+    """Keep both black and white pointillist marks ARGUS blue through inversions.
 
-    The film inverts foreground/background repeatedly. We therefore identify
-    *both* bright and dark neutral components, reject the large background/field
-    components, and map every retained dot core to #2C55E6. A small soft expansion
-    carries the color through antialiased edges without tinting white, gray, black,
-    or colored fields themselves.
+    Light scenes preserve the original broad black/gray-to-blue transform that
+    already covered all of the black dot fields. Dark scenes map white/gray marks
+    to the same ARGUS blue. A bounded bright-component pass catches white or
+    slightly tinted white dots inside colored transition frames without tinting
+    the large white page/background component.
     """
     source = frame.astype(np.float32)
     spread = source.max(axis=2) - source.min(axis=2)
@@ -57,18 +64,37 @@ def recolor_black_dots(frame):
 
     b, g, r = [source[:, :, i] for i in range(3)]
     tone = (0.114 * b + 0.587 * g + 0.299 * r) / 255.0
+    output = source.copy()
 
+    if _border_luma(frame) < 150:
+        # Dark mode: keep the black field black and map every white/gray mark to
+        # ARGUS blue, including antialiased and slightly tinted pointillist edges.
+        mask = neutral & (tone > 0.07)
+        if np.any(mask):
+            t = tone[mask, None]
+            output[mask] = ARGUS_BLUE_BGR[None, :] * t
+        return np.clip(np.rint(output), 0, 255).astype(np.uint8)
+
+    # Light mode: preserve the original full black/gray-dot recolor rather than
+    # filtering by connected-component size. This avoids regressing large dot
+    # fields that visually merge into one illustration.
+    dark_marks = neutral & (tone < 0.93)
+    if np.any(dark_marks):
+        t = tone[dark_marks, None]
+        mapped = ARGUS_BLUE_BGR[None, :] * (1.0 - t) + _WHITE_BGR[None, :] * t
+        output[dark_marks] = mapped
+
+    # White dots can appear over blue/colored transition fields even while the
+    # page border remains light. Reject the giant background component, retain
+    # bounded bright marks, and color their antialiased edges smoothly.
     bright_core = neutral & (tone >= 0.72)
-    dark_core = neutral & (tone <= 0.28)
-    core = _dot_components(bright_core) | _dot_components(dark_core)
-    if not np.any(core):
-        return frame.copy()
+    bright_marks = _dot_components(bright_core)
+    if np.any(bright_marks):
+        core_f = bright_marks.astype(np.float32)
+        soft = cv2.GaussianBlur(core_f, (0, 0), sigmaX=1.25, sigmaY=1.25)
+        alpha = np.maximum(core_f, np.clip(soft * 0.90, 0.0, 0.82))[:, :, None]
+        output = output * (1.0 - alpha) + ARGUS_BLUE_BGR[None, None, :] * alpha
 
-    core_f = core.astype(np.float32)
-    soft = cv2.GaussianBlur(core_f, (0, 0), sigmaX=1.25, sigmaY=1.25)
-    alpha = np.maximum(core_f, np.clip(soft * 0.90, 0.0, 0.82))[:, :, None]
-
-    output = source * (1.0 - alpha) + ARGUS_BLUE_BGR[None, None, :] * alpha
     return np.clip(np.rint(output), 0, 255).astype(np.uint8)
 
 
