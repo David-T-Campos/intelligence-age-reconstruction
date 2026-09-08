@@ -100,7 +100,7 @@ jobs:
           )
           text = text.replace(
               'return result if result is not None else max(0, count - round(fps * 3.5))',
-              'detected = result if result is not None else max(0, count - round(fps * 3.5))\n    return max(0, detected - round(fps * 0.25))'
+              'detected = result if result is not None else max(0, count - round(fps * 3.5))\n    return max(0, detected - round(fps * 0.50))'
           )
           text = text.replace(
               'allowed_low_ssim = max(6, math.ceil(count * 0.01))',
